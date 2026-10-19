@@ -273,12 +273,19 @@ Sync:
   `core_course_get_contents` (`courseid`). Walk sections → modules, skipping
   any with `uservisible == false`. For each module, the `contents[]` entries
   with `type == "file"` become `file` rows (`filename`, `fileurl`,
-  `filesize`, `mimetype`, `timemodified`); `modname` maps to module kind
-  (`resource`/`folder` → files, `url`/`page` → link recorded, not
-  downloadable). A `resource` is one document: keep only its main file
-  (`sortorder == 1`, else the first) — an HTML resource otherwise drags in its
-  `.js`/`.css`/`.png` support files (seen on the real site: 11 files for one
-  page). Module mtime = max file `timemodified`, else
+  `filesize`, `mimetype`, `timemodified`). What each module kind contributes:
+  - `resource` is one document: only its main file (`sortorder == 1`, else
+    the first) attaches directly to the section.
+  - `folder`: a Folder node with every file (the user chose that folder).
+  - every other module (`page`, `label`, `assign`, `url`, …): a Module node
+    (so the reader can open pages/labels) plus its **real attachments** only —
+    contents whose mimetype is not `text/html`, `text/css`, `image/*` or
+    JavaScript. Real-site reason: a `page` lists its rendered `index.html`,
+    `tocbot.js`, `highlight.js`, stylesheets and inline images next to the
+    lecture PDFs attached to it (1290 of 1447 indexed files were this noise).
+  - within a course, identical attachments (same name, size, mtime) listed
+    under several pages are kept once (first occurrence).
+  Module mtime = max file `timemodified`, else
   `contentsinfo.lastmodified`. This mtime feeds both incremental sync and the
   skip-if-identical download check. Full sync of ~10 courses < 5 s.
 - Teams: first sync does a one-time deep crawl — `me/joinedTeams` →
