@@ -98,6 +98,13 @@ needs this conversation's full context. Never let a subagent commit or push.
 - **Commits:** Conventional Commits with a **bare type prefix and no scope** —
   `feat:`, `fix:`, `docs:`, `refactor:`, `chore:`; never `feat(cli):`. Commit
   only when asked; author commits as the repo owner's GitHub account.
+- **Partial commits and `Cargo.lock`:** pre-commit stashes unstaged changes
+  while hooks run, and marks a hook *Failed* if it modifies a tracked file.
+  So a commit whose staged `Cargo.lock` doesn't match its staged manifests
+  fails `cargo clippy` with "files were modified by this hook" even though
+  clippy is clean. Commit one crate at a time with a lock that matches it
+  (stash the other crates' manifest edits, `cargo build`, stage the lock),
+  and always read the full hook output — never grep it down to one line.
 - **CI:** one GitHub Actions workflow, triggered **only on PRs to `main`**,
   running fmt-check → clippy → test → typos. The pre-commit hooks are the
   primary gate; CI is the merge gate. Don't add per-push or per-branch CI.
