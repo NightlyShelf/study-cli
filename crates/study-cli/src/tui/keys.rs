@@ -1,5 +1,7 @@
 //! Key handling: one function per mode (SPEC §4.4).
 
+use std::path::PathBuf;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use study_core::index::NodeKind;
 
@@ -19,6 +21,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         Mode::Alias => alias(app, key.code),
         Mode::Reader => reader(app, key.code),
         Mode::Help => app.mode = Mode::Browse,
+        Mode::Upload => upload(app, key.code),
     }
 }
 
@@ -41,6 +44,9 @@ fn browse(app: &mut App, code: KeyCode) {
         KeyCode::Char('g') => app.pending_g = true,
         KeyCode::Char('G') => app.move_sel(isize::MAX / 2),
         KeyCode::Tab | KeyCode::BackTab => toggle_pane(app),
+        KeyCode::Char('r') => tasks::spawn_sync(app),
+        // Everything above is shared; the rest depends on the tab.
+        _ if app.tab == Tab::Todo => todo(app, code),
         KeyCode::Char('h') | KeyCode::Left => collapse(app),
         KeyCode::Char('l') | KeyCode::Right => expand(app),
         KeyCode::Enter => enter(app),
@@ -51,9 +57,103 @@ fn browse(app: &mut App, code: KeyCode) {
             app.pane = Pane::Contents;
         }
         KeyCode::Char('o') => open(app),
-        KeyCode::Char('r') => tasks::spawn_sync(app),
         _ => {}
     }
+}
+
+fn todo(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Enter => todo_enter(app),
+        KeyCode::Char('o') => {
+            let url = app.todo_row().and_then(|row| row.url.clone());
+            app.open_in_browser(url.as_deref());
+        }
+        KeyCode::Char('A') => {
+            app.todo_all = !app.todo_all;
+            app.rebuild_todo();
+        }
+        KeyCode::Char('u') if app.todo_row().is_some() => {
+            app.input.clear();
+            app.mode = Mode::Upload;
+        }
+        _ => {}
+    }
+}
+
+/// Jumps to the assignment's module in the Files tab, where its handouts
+/// hang, opening the section and the module on the way.
+fn todo_enter(app: &mut App) {
+    let Some(row) = app.todo_row().cloned() else {
+        return;
+    };
+    let (Some(course_id), Some(cmid)) = (row.course_id, row.cmid) else {
+        app.set_error("this assignment has no files");
+        return;
+    };
+    let Some(course) = app.courses.iter().position(|id| *id == course_id) else {
+        app.set_error("the course is hidden in config.toml");
+        return;
+    };
+    let node_id = format!("moodle:mod:{cmid}");
+    if let Some(parent) = app
+        .index
+        .node(&node_id)
+        .and_then(|node| node.parent.clone())
+    {
+        app.expanded.insert(parent);
+    }
+    app.expanded.insert(node_id.clone());
+    app.filter.clear();
+    app.select_course(course);
+    app.tab = Tab::Files;
+    app.pane = Pane::Contents;
+    match app.rows.iter().position(|row| row.id == node_id) {
+        Some(i) => app.row_sel = i,
+        None => app.set_error("assignment not in the files tree — press r to sync"),
+    }
+}
+
+fn upload(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Esc => app.mode = Mode::Browse,
+        KeyCode::Backspace => {
+            app.input.pop();
+        }
+        KeyCode::Char(c) => app.input.push(c),
+        KeyCode::Enter => start_upload(app),
+        _ => {}
+    }
+}
+
+fn start_upload(app: &mut App) {
+    app.mode = Mode::Browse;
+    let Some(row) = app.todo_row() else {
+        return;
+    };
+    let Some(assignid) = row
+        .event_id
+        .strip_prefix("moodle:assign:")
+        .and_then(|id| id.parse::<u64>().ok())
+    else {
+        app.set_error("only Moodle assignments take uploads");
+        return;
+    };
+    let path = resolve_path(app.input.trim(), &app.download_dir);
+    if !path.is_file() {
+        app.set_error(format!("no such file: {}", path.display()));
+        return;
+    }
+    tasks::spawn_upload(app, assignid, path);
+}
+
+/// `~/x` from the home directory, `x` from the launch directory.
+fn resolve_path(input: &str, cwd: &std::path::Path) -> PathBuf {
+    if let Some(rest) = input.strip_prefix("~/")
+        && let Some(home) = std::env::home_dir()
+    {
+        return home.join(rest);
+    }
+    cwd.join(input)
 }
 
 fn toggle_pane(app: &mut App) {
@@ -262,7 +362,7 @@ fn kind_name(kind: NodeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::state::tests::app;
+    use crate::tui::state::tests::{app, todo_app};
 
     fn press(app: &mut App, code: KeyCode) {
         handle(app, KeyEvent::from(code));
@@ -332,6 +432,52 @@ mod tests {
         // Nothing above a closed top-level row: focus goes to Sources.
         press(&mut app, KeyCode::Char('h'));
         assert_eq!(app.pane, Pane::Sources);
+    }
+
+    #[test]
+    fn enter_on_a_todo_row_lands_on_the_module_in_files() {
+        let mut app = todo_app();
+        assert_eq!(app.todo_rows[0].title, "Homework 1");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tab, Tab::Files);
+        assert_eq!(app.pane, Pane::Contents);
+        assert_eq!(app.course_id(), Some("moodle:2"));
+        assert_eq!(app.rows[app.row_sel].id, "moodle:mod:7");
+    }
+
+    #[test]
+    fn todo_keys_toggle_all_and_prompt_for_an_upload() {
+        let mut app = todo_app();
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.todo_sel, 1);
+        press(&mut app, KeyCode::Char('A'));
+        assert!(app.todo_all);
+        press(&mut app, KeyCode::Char('A'));
+        assert!(!app.todo_all);
+        press(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.mode, Mode::Upload);
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.input, "x");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Browse);
+        // A missing file is an error in the footer, not a task.
+        press(&mut app, KeyCode::Char('u'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(app.error);
+        assert!(app.status.starts_with("no such file"));
+    }
+
+    #[test]
+    fn paths_resolve_against_home_or_cwd() {
+        let cwd = std::path::Path::new("/work");
+        assert_eq!(resolve_path("hw.pdf", cwd), PathBuf::from("/work/hw.pdf"));
+        assert_eq!(
+            resolve_path("/abs/hw.pdf", cwd),
+            PathBuf::from("/abs/hw.pdf")
+        );
+        let home = std::env::home_dir().unwrap();
+        assert_eq!(resolve_path("~/hw.pdf", cwd), home.join("hw.pdf"));
     }
 
     #[test]

@@ -9,8 +9,10 @@ use study_core::index::{Index, Node, NodeKind};
 use study_moodle::MoodleClient;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use crate::app;
 use crate::tui::reader::Reader;
 use crate::tui::tasks::Msg;
+use crate::tui::todo::{self, TodoRow};
 use crate::tui::tree::{self, Row};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +35,8 @@ pub enum Mode {
     Alias,
     Reader,
     Help,
+    /// Typing the path of a file to hand in (Todo tab).
+    Upload,
 }
 
 pub struct App {
@@ -53,8 +57,15 @@ pub struct App {
     pub rows: Vec<Row>,
     pub row_sel: usize,
     pub filter: String,
-    /// The alias being typed.
+    /// The alias or upload path being typed.
     pub input: String,
+    /// Coursework shown in the Todo tab, soonest due first.
+    pub todo_rows: Vec<TodoRow>,
+    pub todo_sel: usize,
+    /// Show finished and long-overdue work too (`A`).
+    pub todo_all: bool,
+    /// How many rows `todo_all` would reveal.
+    pub todo_hidden: usize,
     pub reader: Option<Reader>,
     /// Pages fetched this session, by node id, so reopening is instant.
     pub pages: HashMap<String, Reader>,
@@ -94,6 +105,10 @@ impl App {
             row_sel: 0,
             filter: String::new(),
             input: String::new(),
+            todo_rows: Vec::new(),
+            todo_sel: 0,
+            todo_all: false,
+            todo_hidden: 0,
             reader: None,
             pages: HashMap::new(),
             status: String::new(),
@@ -129,6 +144,7 @@ impl App {
         }
         self.course_sel = self.course_sel.min(self.courses.len().saturating_sub(1));
         self.rebuild_rows();
+        self.rebuild_todo();
     }
 
     pub fn course_id(&self) -> Option<&str> {
@@ -141,6 +157,22 @@ impl App {
 
     pub fn row(&self) -> Option<&Row> {
         self.rows.get(self.row_sel)
+    }
+
+    pub fn todo_row(&self) -> Option<&TodoRow> {
+        self.todo_rows.get(self.todo_sel)
+    }
+
+    pub fn rebuild_todo(&mut self) {
+        let now = app::now();
+        let all = todo::todo_rows(&self.index, &self.config, now);
+        let total = all.len();
+        self.todo_rows = all
+            .into_iter()
+            .filter(|row| self.todo_all || todo::is_current(row, now))
+            .collect();
+        self.todo_hidden = total - self.todo_rows.len();
+        self.todo_sel = self.todo_sel.min(self.todo_rows.len().saturating_sub(1));
     }
 
     pub fn rebuild_rows(&mut self) {
@@ -164,6 +196,10 @@ impl App {
 
     /// Moves the selection of the focused pane by `delta`, clamped.
     pub fn move_sel(&mut self, delta: isize) {
+        if self.tab == Tab::Todo {
+            self.todo_sel = shifted(self.todo_sel, delta, self.todo_rows.len());
+            return;
+        }
         match self.pane {
             Pane::Sources => {
                 self.select_course(shifted(self.course_sel, delta, self.courses.len()))
@@ -230,6 +266,14 @@ pub mod tests {
         App::new(config, sample(), None, PathBuf::from("/tmp"))
     }
 
+    /// `app()` on the Todo tab with two assignments (see `todo::tests`).
+    pub fn todo_app() -> App {
+        let mut app = app();
+        app.replace_index(crate::tui::todo::tests::coursework(app::now()));
+        app.tab = Tab::Todo;
+        app
+    }
+
     #[test]
     fn new_opens_sections_of_the_first_course() {
         let app = app();
@@ -253,6 +297,23 @@ pub mod tests {
         assert!(app.rows.is_empty());
         app.move_sel(1);
         assert_eq!(app.course_sel, 1);
+    }
+
+    #[test]
+    fn todo_rows_follow_the_index_and_the_all_toggle() {
+        let mut app = todo_app();
+        assert_eq!(app.todo_rows.len(), 2);
+        assert_eq!(app.todo_hidden, 0);
+        app.move_sel(5);
+        assert_eq!(app.todo_sel, 1);
+        app.index.events[0].status = Some("submitted".to_string());
+        app.rebuild_todo();
+        assert_eq!(app.todo_rows.len(), 1);
+        assert_eq!(app.todo_hidden, 1);
+        assert_eq!(app.todo_sel, 0);
+        app.todo_all = true;
+        app.rebuild_todo();
+        assert_eq!(app.todo_rows.len(), 2);
     }
 
     #[test]

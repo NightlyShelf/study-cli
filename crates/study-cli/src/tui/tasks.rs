@@ -14,7 +14,15 @@ pub enum Msg {
     Status(String),
     Downloaded(PathBuf),
     Synced(Index),
-    Page { node_id: String, reader: Reader },
+    Page {
+        node_id: String,
+        reader: Reader,
+    },
+    /// A submission draft now holds `file_name`.
+    Uploaded {
+        event_id: String,
+        file_name: String,
+    },
     Error(String),
 }
 
@@ -37,7 +45,32 @@ pub fn apply(app: &mut App, msg: Msg) {
             app.mode = crate::tui::state::Mode::Reader;
             app.set_status("");
         }
+        Msg::Uploaded {
+            event_id,
+            file_name,
+        } => mark_uploaded(app, &event_id, &file_name),
         Msg::Error(text) => app.set_error(text),
+    }
+}
+
+/// Records the draft locally so the Todo tab is right before the next
+/// sync, and persists it for the CLI.
+fn mark_uploaded(app: &mut App, event_id: &str, file_name: &str) {
+    let Some(event) = app
+        .index
+        .events
+        .iter_mut()
+        .find(|event| event.id == event_id)
+    else {
+        app.set_status(format!("uploaded {file_name} as a draft"));
+        return;
+    };
+    event.status = Some("draft".to_string());
+    let title = event.title.clone();
+    app.rebuild_todo();
+    match app::save_index(&app.index) {
+        Ok(()) => app.set_status(format!("uploaded {file_name} as a draft to \"{title}\"")),
+        Err(err) => app.set_error(format!("{err:#}")),
     }
 }
 
@@ -148,6 +181,36 @@ pub fn spawn_page(app: &mut App, node_id: &str) {
                 Msg::Page { node_id, reader }
             }
             Err(err) => Msg::Error(format!("{err:#}")),
+        };
+        let _ = tx.send(msg);
+    });
+}
+
+/// Puts `path` into a fresh draft area and attaches it to the assignment's
+/// file submission. A draft only: submitting for grading is irreversible,
+/// so it stays a deliberate CLI flag.
+pub fn spawn_upload(app: &mut App, assignid: u64, path: PathBuf) {
+    let Some(client) = client(app) else {
+        return;
+    };
+    let tx = app.tx.clone();
+    app.busy = true;
+    app.set_status(format!("uploading {}…", path.display()));
+    tokio::spawn(async move {
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let saved = match client.upload_file(&path, None).await {
+            Ok(itemid) => client.save_submission(assignid, itemid).await,
+            Err(err) => Err(err),
+        };
+        let msg = match saved {
+            Ok(()) => Msg::Uploaded {
+                event_id: format!("moodle:assign:{assignid}"),
+                file_name,
+            },
+            Err(err) => Msg::Error(format!("upload failed: {err}")),
         };
         let _ = tx.send(msg);
     });

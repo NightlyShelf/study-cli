@@ -8,8 +8,9 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Tabs,
 use study_core::index::NodeKind;
 
 use crate::app;
-use crate::fmt::{human_age, human_size};
+use crate::fmt::{date, human_age, human_size};
 use crate::tui::state::{App, Mode, Pane, Tab, course_label};
+use crate::tui::todo::TodoRow;
 use crate::tui::tree::{Row, RowKind};
 
 const HELP: &str = "\
@@ -18,7 +19,11 @@ h l ← →     collapse/expand d       download file or whole node
 Tab S-Tab   switch pane     a       alias for the course
 1 2 3       switch tab      /       filter (Enter keeps, Esc clears)
 g g / G     top / bottom    o       open in browser
-r           sync now        q Esc   quit / close";
+r           sync now        q Esc   quit / close
+
+Todo tab    Enter   its files in the Files tab
+            u       upload a submission draft
+            A       show finished and old work too";
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let [tabs, body, footer] = Layout::vertical([
@@ -31,7 +36,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.tab {
         Tab::Files => draw_files(frame, app, body),
         Tab::Calendar => frame.render_widget(Paragraph::new("Calendar: not implemented yet"), body),
-        Tab::Todo => frame.render_widget(Paragraph::new("Todo: not implemented yet"), body),
+        Tab::Todo => draw_todo(frame, app, body),
     }
     draw_footer(frame, app, footer);
     match app.mode {
@@ -192,6 +197,84 @@ fn row_detail(app: &App, row: &Row) -> Vec<String> {
     ]
 }
 
+fn draw_todo(frame: &mut Frame, app: &App, area: Rect) {
+    let [list, detail] =
+        Layout::horizontal([Constraint::Percentage(75), Constraint::Percentage(25)]).areas(area);
+    draw_todo_list(frame, app, list);
+    let text: Vec<Line> = todo_detail(app).into_iter().map(Line::from).collect();
+    let paragraph = Paragraph::new(text)
+        .block(Block::bordered().title("Detail"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, detail);
+}
+
+fn draw_todo_list(frame: &mut Frame, app: &App, area: Rect) {
+    let title = if app.todo_all { "Todo (all)" } else { "Todo" };
+    if app.todo_rows.is_empty() {
+        let hint = if app.todo_hidden > 0 {
+            "no upcoming coursework — A shows everything"
+        } else {
+            "no upcoming coursework — press r to sync"
+        };
+        frame.render_widget(Paragraph::new(hint).block(pane_block(title, true)), area);
+        return;
+    }
+    let width = usize::from(area.width.saturating_sub(2));
+    let items: Vec<ListItem> = app
+        .todo_rows
+        .iter()
+        .map(|row| ListItem::new(todo_line(row, width)))
+        .collect();
+    let list = List::new(items)
+        .block(pane_block(title, true))
+        .highlight_style(highlight(true));
+    let height = area.height.saturating_sub(2);
+    let mut state = ListState::default()
+        .with_selected(Some(app.todo_sel))
+        .with_offset(offset(app.todo_sel, app.todo_rows.len(), height));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// `due · status · course · title` in fixed columns; overdue work is red.
+fn todo_line(row: &TodoRow, width: usize) -> Line<'static> {
+    let text = format!(
+        "{:<9} {:<10} {:<24} {}",
+        row.due_text,
+        row.status,
+        fit(&row.course, 23),
+        row.title
+    );
+    let span = Span::raw(fit(&text, width));
+    if row.due_text.ends_with("ago") && row.status.is_empty() {
+        Line::from(span.fg(Color::Red))
+    } else {
+        Line::from(span)
+    }
+}
+
+fn todo_detail(app: &App) -> Vec<String> {
+    let Some(row) = app.todo_row() else {
+        return vec!["no coursework selected".to_string()];
+    };
+    let due = match row.due {
+        Some(due) => format!("due {} ({})", date(due), row.due_text),
+        None => "no due date".to_string(),
+    };
+    let status = if row.status.is_empty() {
+        "not handed in".to_string()
+    } else {
+        row.status.clone()
+    };
+    vec![
+        row.title.clone(),
+        row.course.clone(),
+        due,
+        status,
+        String::new(),
+        "Enter files · o open · u upload · A all".to_string(),
+    ]
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let line = match app.mode {
         Mode::Filter => Line::from(format!("/{}_   {} rows", app.filter, app.rows.len())),
@@ -199,6 +282,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             "alias: {}_   (Enter saves, Esc cancels)",
             app.input
         )),
+        Mode::Upload => {
+            let title = app.todo_row().map(|row| row.title.as_str()).unwrap_or("");
+            Line::from(format!(
+                "upload to \"{title}\": {}_   (Enter saves a draft, Esc cancels)",
+                app.input
+            ))
+        }
         Mode::Reader => Line::from("j k scroll   g g / G ends   o open   Esc close"),
         Mode::Help => Line::from("any key closes"),
         Mode::Browse => browse_footer(app),
@@ -305,7 +395,7 @@ mod tests {
 
     use super::*;
     use crate::tui::reader::Reader;
-    use crate::tui::state::tests::app;
+    use crate::tui::state::tests::{app, todo_app};
 
     fn render(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -358,6 +448,35 @@ mod tests {
         assert!(render(&app).contains("not implemented yet"));
         app.mode = Mode::Help;
         assert!(render(&app).contains("switch pane"));
+    }
+
+    #[test]
+    fn todo_tab_lists_coursework_with_a_detail_pane() {
+        let mut app = todo_app();
+        let text = render(&app);
+        assert!(text.contains("in 3d"));
+        assert!(text.contains("Homework 1"));
+        assert!(text.contains("Algebra"));
+        assert!(text.contains("Essay"));
+        assert!(text.contains("due 20"));
+        assert!(text.contains("not handed in"));
+        assert!(text.contains("u upload"));
+        app.mode = Mode::Upload;
+        app.input = "hw.pdf".to_string();
+        assert!(render(&app).contains("upload to \"Homework 1\": hw.pdf_"));
+    }
+
+    #[test]
+    fn todo_tab_empty_states() {
+        let mut app = app();
+        app.tab = Tab::Todo;
+        assert!(render(&app).contains("press r to sync"));
+        let mut app = todo_app();
+        for event in &mut app.index.events {
+            event.status = Some("submitted".to_string());
+        }
+        app.rebuild_todo();
+        assert!(render(&app).contains("A shows everything"));
     }
 
     #[test]
