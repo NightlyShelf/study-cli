@@ -8,3 +8,14 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+directories = "6.0.0"
+keyring = "4.2.0"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml = "1.1.8"
+
+[dev-dependencies]
+tempfile = "3.27.0"
