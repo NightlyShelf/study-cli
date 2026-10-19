@@ -97,10 +97,14 @@ name, truncated.
 | Focused item            | Enter does                                      |
 |-------------------------|-------------------------------------------------|
 | file                    | download to the launch directory                |
-| folder                  | expand; `Enter` again on it downloads recursively |
-| Moodle `page` / `label` | open reader with its rendered HTML (§4.3)        |
+| section / folder        | toggle expand (`d` downloads it recursively)    |
+| Moodle `page`           | open reader with its rendered HTML (§4.3)        |
 | Teams `💬 Messages`      | open reader with the channel transcript (§4.3)   |
-| `url` link              | `o` opens in browser (not downloadable)          |
+| `url` link              | open in browser (not downloadable)               |
+
+`d` downloads the focused item: a file, or every file under a section/folder
+into `<cwd>/<node name>/…`. Toggling and downloading are separate keys on
+purpose — "Enter again downloads" was too easy to trigger by accident.
 
 Teams layout: a team with only a **General** channel shows its files directly
 under the course (the channel is hidden) plus a `💬 Messages (General)` entry.
@@ -114,13 +118,16 @@ both Moodle pages/labels and Teams channel messages. Content is fetched **on
 demand** when the reader opens (brief spinner), not stored in the index —
 messages are volatile and pages are cheap — and cached for the session.
 
-- Moodle page/label: `mod_page_get_pages_by_courses` for the course → the
-  module's HTML; labels use the module description.
+- Moodle page: `mod_page_get_pages_by_courses` for the course → the module
+  matched by `coursemodule` → its `content` HTML. (Labels are deferred: their
+  text only exists in `core_course_get_contents`' `description`, which the
+  index deliberately doesn't store.)
 - Teams messages: `GET /teams/{id}/channels/{cid}/messages?$expand=replies&$top=50`,
   rendered as a transcript (author · time, body, replies indented).
 
-Reader keys: `j k` / arrows scroll, `g g`/`G` ends, link markers `[1] [2]…`
-with `o <n>` to open a link in the browser, `Esc` closes back to the tree.
+Reader keys: `j k` / arrows scroll, `g g`/`G` ends, `o` opens the page itself
+in the browser, `Esc`/`q` closes back to the tree. Numbered in-text links
+(`o <n>`) are a later refinement.
 
 ### 4.4 Keys
 
@@ -128,8 +135,9 @@ with `o <n>` to open a link in the browser, `Esc` closes back to the tree.
 |--------------|-----------------------------------------------------|
 | h j k l / ←↓↑→ | move / collapse / expand                           |
 | Enter        | act on item (§4.2)                                  |
+| d            | download focused file / node recursively (§4.2)     |
 | a            | set/change alias for the focused course             |
-| /            | filter current pane; `/` on Sources filters globally|
+| /            | filter the current pane (substring, live)           |
 | Tab / S-Tab  | next / previous pane; `1` `2` `3` switch tabs       |
 | u            | upload: pick local file (path prompt) to focused target |
 | o            | open in browser                                     |
@@ -448,7 +456,7 @@ and index paths). No wall of prose; examples over explanation.
 | 0 | Auth: (a) Moodle mobile service confirmed enabled on the real site ✓; (b) Teams device-code with Teams client + `.default` confirmed viable via reference impl ✓ | both resolved |
 | 1 | Workspace scaffold: four crates compile, `rustfmt.toml`, `[workspace.lints]`, `.pre-commit-config.yaml`, PR-to-main CI, short README (§9.2–9.3) | done 2026-10-19 (`27f2134`) |
 | 2 | `login moodle`, `sync`, `ls`, `find`, `get` for Moodle | done 2026-10-19 (`d132979`); real-site run: 15 courses / 1447 files |
-| 3 | TUI Files tab (Moodle), aliases, reader overlay for pages | |
+| 3 | TUI Files tab (Moodle), aliases, reader overlay for pages | done 2026-10-19 |
 | 4 | `put` for Moodle assignments; Todo tab | |
 | 5 | Calendar tab, `cal` | |
 | 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | |
