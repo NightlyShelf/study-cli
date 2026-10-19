@@ -39,6 +39,12 @@ impl MoodleClient {
         let separator = if fileurl.contains('?') { '&' } else { '?' };
         format!("{fileurl}{separator}token={}", self.token)
     }
+
+    /// Starts a download of a `pluginfile.php` url; the caller streams the body.
+    pub async fn download(&self, fileurl: &str) -> Result<reqwest::Response> {
+        let response = self.http.get(self.file_url(fileurl)).send().await?;
+        Ok(response.error_for_status()?)
+    }
 }
 
 /// Flattens a list into Moodle's `name[0]`, `name[1]`, … form parameters.

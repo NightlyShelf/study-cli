@@ -19,6 +19,15 @@ pub enum SourceKind {
     Teams,
 }
 
+impl SourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourceKind::Moodle => "moodle",
+            SourceKind::Teams => "teams",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeKind {
