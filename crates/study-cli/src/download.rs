@@ -11,39 +11,41 @@ use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use study_core::index::File;
 
-/// Streams `response` (from `app::fetch`) into `dir` as `file`, returning
-/// where it ended up. An unchanged local copy is skipped unless `force`; an
-/// existing file gets a `name (2).ext` sibling unless `overwrite`. `quiet`
-/// silences stdout and the progress bar, which would corrupt the TUI's
-/// alternate screen.
-pub async fn download(
-    response: reqwest::Response,
-    file: &File,
-    dir: &Path,
-    force: bool,
-    overwrite: bool,
-    quiet: bool,
-) -> Result<PathBuf> {
-    let mut dest = dir.join(&file.name);
+/// Where `file` would be written under `dir`, or `None` when the local copy
+/// is unchanged and should be skipped (SPEC §7). Decided before any request
+/// so a batch of already-present files costs no network. `force` downloads
+/// an unchanged file anyway; an existing file gets a `name (2).ext` sibling
+/// unless `overwrite`.
+pub fn plan(file: &File, dir: &Path, force: bool, overwrite: bool) -> Result<Option<PathBuf>> {
+    let dest = dir.join(&file.name);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    if dest.exists() && !overwrite {
-        if !force && is_unchanged(&fs::metadata(&dest)?, file) {
-            if !quiet {
-                println!("skip (unchanged): {}", file.name);
-            }
-            return Ok(dest);
-        }
-        dest = free_name(dir, &file.name);
+    if !dest.exists() || overwrite {
+        return Ok(Some(dest));
     }
+    if !force && is_unchanged(&fs::metadata(&dest)?, file) {
+        return Ok(None);
+    }
+    Ok(Some(free_name(dir, &file.name)))
+}
 
+/// Streams `response` (from `app::fetch`) into `dest` (from [`plan`]) via a
+/// `.part` file, mirroring the remote mtime, and returns `dest`. `quiet`
+/// silences stdout and the progress bar, which would corrupt the TUI's
+/// alternate screen.
+pub async fn save(
+    response: reqwest::Response,
+    file: &File,
+    dest: &Path,
+    quiet: bool,
+) -> Result<PathBuf> {
     let bar = if quiet {
         ProgressBar::hidden()
     } else {
         progress_bar(&file.name, response.content_length())
     };
-    let part = part_path(&dest);
+    let part = part_path(dest);
     let written = write_stream(response, &part, &bar).await;
     bar.finish_and_clear();
     if written.is_err() {
@@ -51,17 +53,17 @@ pub async fn download(
         let _ = fs::remove_file(&part);
     }
     written.with_context(|| format!("downloading {}", file.name))?;
-    fs::rename(&part, &dest).with_context(|| format!("renaming to {}", dest.display()))?;
+    fs::rename(&part, dest).with_context(|| format!("renaming to {}", dest.display()))?;
 
     // Mirror the remote mtime so the unchanged check works next time.
     if let Some(mtime) = file.mtime {
-        let handle = fs::OpenOptions::new().write(true).open(&dest)?;
+        let handle = fs::OpenOptions::new().write(true).open(dest)?;
         handle.set_modified(UNIX_EPOCH + Duration::from_secs(mtime))?;
     }
     if !quiet {
         println!("{}", dest.display());
     }
-    Ok(dest)
+    Ok(dest.to_path_buf())
 }
 
 /// True when the local copy has the same size and modification time as the
@@ -189,6 +191,41 @@ mod tests {
         let mut unknown = remote("a.pdf", 5, 0);
         unknown.mtime = None;
         assert!(!is_unchanged(&meta, &unknown));
+    }
+
+    #[test]
+    fn plan_skips_unchanged_and_suffixes_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.pdf");
+        fs::write(&path, b"hello").unwrap();
+        let handle = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        handle
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+            .unwrap();
+
+        let same = remote("a.pdf", 5, 1_700_000_000);
+        assert_eq!(plan(&same, dir.path(), false, false).unwrap(), None);
+        assert_eq!(
+            plan(&same, dir.path(), true, false).unwrap(),
+            Some(dir.path().join("a (2).pdf"))
+        );
+
+        let changed = remote("a.pdf", 6, 1_700_000_000);
+        assert_eq!(
+            plan(&changed, dir.path(), false, false).unwrap(),
+            Some(dir.path().join("a (2).pdf"))
+        );
+        assert_eq!(
+            plan(&changed, dir.path(), false, true).unwrap(),
+            Some(path.clone())
+        );
+
+        let fresh = remote("sub/b.pdf", 1, 1);
+        assert_eq!(
+            plan(&fresh, dir.path(), false, false).unwrap(),
+            Some(dir.path().join("sub/b.pdf"))
+        );
+        assert!(dir.path().join("sub").is_dir());
     }
 
     #[test]

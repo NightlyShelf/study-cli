@@ -87,7 +87,8 @@ pub fn spawn_download(app: &mut App, file: File) {
     app.set_status(format!("downloading {}…", file.name));
     tokio::spawn(async move {
         let msg = match fetch_and_save(&moodle, &graph, &file, &dir).await {
-            Ok(path) => Msg::Downloaded(path),
+            Ok(Some(path)) => Msg::Downloaded(path),
+            Ok(None) => Msg::Status(format!("skipped {} (unchanged)", file.name)),
             Err(err) => Msg::Error(format!("{err:#}")),
         };
         let _ = tx.send(msg);
@@ -97,14 +98,18 @@ pub fn spawn_download(app: &mut App, file: File) {
     });
 }
 
+/// `None` when the local copy is unchanged, so no request was made.
 async fn fetch_and_save(
     moodle: &Option<MoodleClient>,
     graph: &Option<GraphClient>,
     file: &File,
     dir: &Path,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(dest) = download::plan(file, dir, false, false)? else {
+        return Ok(None);
+    };
     let response = app::fetch(moodle.as_ref(), graph.as_ref(), file).await?;
-    download::download(response, file, dir, false, false, true).await
+    download::save(response, file, &dest, true).await.map(Some)
 }
 
 fn is_teams(file: &File) -> bool {
@@ -163,7 +168,13 @@ async fn save_all(
     for (i, (file, subdir)) in files.iter().enumerate() {
         let status = format!("downloading {}/{total}: {}", i + 1, file.name);
         let _ = tx.send(Msg::Status(status));
-        fetch_and_save(moodle, graph, file, &dir.join(subdir)).await?;
+        if fetch_and_save(moodle, graph, file, &dir.join(subdir))
+            .await?
+            .is_none()
+        {
+            let status = format!("skipped {}/{total}: {} (unchanged)", i + 1, file.name);
+            let _ = tx.send(Msg::Status(status));
+        }
     }
     Ok(())
 }

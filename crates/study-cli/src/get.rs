@@ -36,8 +36,12 @@ pub async fn run(
         }
     };
     for (file, subdir) in targets {
+        let Some(dest) = download::plan(file, &dir.join(subdir), force, overwrite)? else {
+            println!("skip (unchanged): {}", file.name);
+            continue;
+        };
         let response = app::fetch(moodle.as_ref(), graph.as_ref(), file).await?;
-        download::download(response, file, &dir.join(subdir), force, overwrite, false).await?;
+        download::save(response, file, &dest, false).await?;
     }
     if let Some(graph) = &graph {
         app::persist_graph_token(graph)?;

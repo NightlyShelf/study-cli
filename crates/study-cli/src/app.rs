@@ -61,7 +61,7 @@ pub fn persist_graph_token(graph: &GraphClient) -> Result<()> {
 }
 
 /// Starts downloading `file` from whichever source owns it; the caller
-/// streams the body (see `download::download`).
+/// streams the body (see `download::save`).
 pub async fn fetch(
     moodle: Option<&MoodleClient>,
     graph: Option<&GraphClient>,
