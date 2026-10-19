@@ -9,6 +9,7 @@ use study_core::index::NodeKind;
 
 use crate::app;
 use crate::fmt::{date, human_age, human_size};
+use crate::tui::calendar;
 use crate::tui::state::{App, Mode, Pane, Tab, course_label};
 use crate::tui::todo::TodoRow;
 use crate::tui::tree::{Row, RowKind};
@@ -23,7 +24,10 @@ r           sync now        q Esc   quit / close
 
 Todo tab    Enter   its files in the Files tab
             u       upload a submission draft
-            A       show finished and old work too";
+            A       show finished and old work too
+
+Calendar    h l / j k   day / week      H L   month    t   today
+            J K         event           Enter its course in Files";
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let [tabs, body, footer] = Layout::vertical([
@@ -35,7 +39,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_tabs(frame, app, tabs);
     match app.tab {
         Tab::Files => draw_files(frame, app, body),
-        Tab::Calendar => frame.render_widget(Paragraph::new("Calendar: not implemented yet"), body),
+        Tab::Calendar => draw_calendar(frame, app, body),
         Tab::Todo => draw_todo(frame, app, body),
     }
     draw_footer(frame, app, footer);
@@ -197,6 +201,79 @@ fn row_detail(app: &App, row: &Row) -> Vec<String> {
     ]
 }
 
+fn draw_calendar(frame: &mut Frame, app: &App, area: Rect) {
+    let [grid, events] =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+    let paragraph = Paragraph::new(month_grid(app)).block(pane_block("Calendar", true));
+    frame.render_widget(paragraph, grid);
+    let title = app.cal_day().map(|day| date(day.secs)).unwrap_or_default();
+    let width = usize::from(events.width.saturating_sub(2));
+    let paragraph = Paragraph::new(day_events(app, width)).block(Block::bordered().title(title));
+    frame.render_widget(paragraph, events);
+}
+
+/// `October 2026`, the weekday row, then a line per week; `*` marks days
+/// with events, the selection is reversed and today underlined.
+fn month_grid(app: &App) -> Vec<Line<'static>> {
+    let today = calendar::civil(app::now());
+    let first = calendar::days_from_civil(app.cal_year, app.cal_month, 1);
+    let header = format!("{} {}", calendar::month_name(app.cal_month), app.cal_year);
+    let mut lines = vec![
+        Line::from(header).bold(),
+        Line::from("Mo  Tu  We  Th  Fr  Sa  Su").dim(),
+    ];
+    let mut week = vec![Span::raw("    ".repeat(calendar::weekday(first) as usize))];
+    for (i, day) in app.cal_days.iter().enumerate() {
+        let number = i as u32 + 1;
+        let marker = if day.events.is_empty() { ' ' } else { '*' };
+        let mut span = Span::raw(format!("{number:>2}{marker}"));
+        if number == app.cal_day {
+            span = span.reversed();
+        }
+        if (app.cal_year, app.cal_month, number) == today {
+            span = span.bold().underlined();
+        }
+        week.push(span);
+        week.push(Span::raw(" "));
+        if calendar::weekday(first + i as i64) == 6 {
+            lines.push(Line::from(std::mem::take(&mut week)));
+        }
+    }
+    if week.len() > 1 {
+        lines.push(Line::from(week));
+    }
+    lines
+}
+
+/// `HH:MM  kind  title` per event with its course dimmed underneath, the
+/// selected one bold; the key hints close the pane.
+fn day_events(app: &App, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match app.cal_day() {
+        Some(day) if !day.events.is_empty() => {
+            for (i, entry) in day.events.iter().enumerate() {
+                let head = format!("{}  {:<6} {}", entry.time, entry.kind, entry.title);
+                let span = Span::raw(fit(&head, width));
+                lines.push(Line::from(if i == app.cal_sel {
+                    span.bold()
+                } else {
+                    span
+                }));
+                if !entry.course.is_empty() {
+                    let course = fit(&format!("       {}", entry.course), width);
+                    lines.push(Line::from(Span::raw(course).dim()));
+                }
+            }
+        }
+        _ => lines.push(Line::from("no events")),
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from("h/l day · j/k week · H/L month").dim());
+    lines.push(Line::from("t today · J/K event").dim());
+    lines.push(Line::from("Enter files · o open").dim());
+    lines
+}
+
 fn draw_todo(frame: &mut Frame, app: &App, area: Rect) {
     let [list, detail] =
         Layout::horizontal([Constraint::Percentage(75), Constraint::Percentage(25)]).areas(area);
@@ -337,7 +414,7 @@ fn draw_reader(frame: &mut Frame, app: &App) {
 }
 
 fn draw_help(frame: &mut Frame) {
-    let area = centered(frame.area(), 70, 50);
+    let area = centered(frame.area(), 70, 60);
     let paragraph = Paragraph::new(HELP).block(Block::bordered().title(" Keys "));
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
@@ -395,7 +472,7 @@ mod tests {
 
     use super::*;
     use crate::tui::reader::Reader;
-    use crate::tui::state::tests::{app, todo_app};
+    use crate::tui::state::tests::{app, calendar_app, todo_app};
 
     fn render(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -442,12 +519,38 @@ mod tests {
     }
 
     #[test]
-    fn other_tabs_and_help_render() {
+    fn help_renders() {
+        let mut app = app();
+        app.mode = Mode::Help;
+        let text = render(&app);
+        assert!(text.contains("switch pane"));
+        assert!(text.contains("its course in Files"));
+    }
+
+    #[test]
+    fn calendar_tab_shows_the_grid_and_the_days_events() {
+        let app = calendar_app();
+        let text = render(&app);
+        let header = format!("{} {}", calendar::month_name(app.cal_month), app.cal_year);
+        assert!(text.contains(&header));
+        assert!(text.contains("Mo  Tu  We  Th  Fr  Sa  Su"));
+        assert!(text.contains(&format!("{:>2}*", app.cal_day)));
+        assert!(text.contains("09:00  due    Lab due"));
+        assert!(text.contains("14:00  due    Exam"));
+        assert!(text.contains("       algo"));
+        assert!(text.contains(&date(app.cal_day().unwrap().secs)));
+        assert!(text.contains("t today · J/K event"));
+        assert!(!text.contains("no events"));
+    }
+
+    #[test]
+    fn calendar_tab_without_events() {
         let mut app = app();
         app.tab = Tab::Calendar;
-        assert!(render(&app).contains("not implemented yet"));
-        app.mode = Mode::Help;
-        assert!(render(&app).contains("switch pane"));
+        let text = render(&app);
+        assert!(text.contains("no events"));
+        assert!(!text.contains('*'));
+        assert!(text.contains(&format!("{:>2} ", app.cal_day)));
     }
 
     #[test]

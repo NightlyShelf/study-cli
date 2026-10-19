@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use study_core::index::NodeKind;
 
 use crate::app;
+use crate::tui::calendar;
 use crate::tui::state::{App, Mode, Pane, Tab};
 use crate::tui::tasks;
 use crate::tui::tree::{self, RowKind};
@@ -38,14 +39,16 @@ fn browse(app: &mut App, code: KeyCode) {
         KeyCode::Char('1') => app.tab = Tab::Files,
         KeyCode::Char('2') => app.tab = Tab::Calendar,
         KeyCode::Char('3') => app.tab = Tab::Todo,
+        KeyCode::Tab | KeyCode::BackTab => toggle_pane(app),
+        KeyCode::Char('r') => tasks::spawn_sync(app),
+        // Everything above is shared; the rest depends on the tab. The
+        // calendar moves by dates, so it takes over j/k/g/G as well.
+        _ if app.tab == Tab::Calendar => calendar(app, code, pending_g),
         KeyCode::Char('j') | KeyCode::Down => app.move_sel(1),
         KeyCode::Char('k') | KeyCode::Up => app.move_sel(-1),
         KeyCode::Char('g') if pending_g => app.move_sel(isize::MIN / 2),
         KeyCode::Char('g') => app.pending_g = true,
         KeyCode::Char('G') => app.move_sel(isize::MAX / 2),
-        KeyCode::Tab | KeyCode::BackTab => toggle_pane(app),
-        KeyCode::Char('r') => tasks::spawn_sync(app),
-        // Everything above is shared; the rest depends on the tab.
         _ if app.tab == Tab::Todo => todo(app, code),
         KeyCode::Char('h') | KeyCode::Left => collapse(app),
         KeyCode::Char('l') | KeyCode::Right => expand(app),
@@ -59,6 +62,64 @@ fn browse(app: &mut App, code: KeyCode) {
         KeyCode::Char('o') => open(app),
         _ => {}
     }
+}
+
+fn calendar(app: &mut App, code: KeyCode, pending_g: bool) {
+    let (year, month, day) = (app.cal_year, app.cal_month, app.cal_day);
+    match code {
+        KeyCode::Char('h') | KeyCode::Left => move_day(app, -1),
+        KeyCode::Char('l') | KeyCode::Right => move_day(app, 1),
+        KeyCode::Char('j') | KeyCode::Down => move_day(app, 7),
+        KeyCode::Char('k') | KeyCode::Up => move_day(app, -7),
+        KeyCode::Char('H') => {
+            let (year, month) = calendar::add_months(year, month, -1);
+            app.set_date(year, month, day);
+        }
+        KeyCode::Char('L') => {
+            let (year, month) = calendar::add_months(year, month, 1);
+            app.set_date(year, month, day);
+        }
+        KeyCode::Char('t') => {
+            let (year, month, day) = calendar::civil(app::now());
+            app.set_date(year, month, day);
+        }
+        KeyCode::Char('g') if pending_g => app.set_date(year, month, 1),
+        KeyCode::Char('g') => app.pending_g = true,
+        KeyCode::Char('G') => app.set_date(year, month, calendar::month_days(year, month)),
+        KeyCode::Char('J') => app.move_event_sel(1),
+        KeyCode::Char('K') => app.move_event_sel(-1),
+        KeyCode::Char('o') => {
+            let url = app.cal_entry().and_then(|entry| entry.url.clone());
+            app.open_in_browser(url.as_deref());
+        }
+        KeyCode::Enter => calendar_enter(app),
+        _ => {}
+    }
+}
+
+fn move_day(app: &mut App, delta: i64) {
+    let (year, month, day) = calendar::add_days(app.cal_year, app.cal_month, app.cal_day, delta);
+    app.set_date(year, month, day);
+}
+
+/// Shows the event's course in the Files tab; the event itself has no
+/// node to land on.
+fn calendar_enter(app: &mut App) {
+    let Some(entry) = app.cal_entry() else {
+        app.set_status("no events on this day");
+        return;
+    };
+    let Some(course_id) = entry.course_id.clone() else {
+        app.set_error("this event belongs to no course");
+        return;
+    };
+    let Some(course) = app.courses.iter().position(|id| *id == course_id) else {
+        app.set_error("the course is hidden in config.toml");
+        return;
+    };
+    app.select_course(course);
+    app.tab = Tab::Files;
+    app.pane = Pane::Sources;
 }
 
 fn todo(app: &mut App, code: KeyCode) {
@@ -362,7 +423,7 @@ fn kind_name(kind: NodeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::state::tests::{app, todo_app};
+    use crate::tui::state::tests::{app, calendar_app, todo_app};
 
     fn press(app: &mut App, code: KeyCode) {
         handle(app, KeyEvent::from(code));
@@ -466,6 +527,60 @@ mod tests {
         assert_eq!(app.mode, Mode::Browse);
         assert!(app.error);
         assert!(app.status.starts_with("no such file"));
+    }
+
+    #[test]
+    fn calendar_keys_move_by_day_week_and_month() {
+        let mut app = calendar_app();
+        let (year, month, day) = calendar::civil(app::now());
+        let next = calendar::add_months(year, month, 1);
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.cal_day, calendar::month_days(year, month));
+        // Past the last day: the next month comes in, on its first day.
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(
+            (app.cal_year, app.cal_month, app.cal_day),
+            (next.0, next.1, 1)
+        );
+        press(&mut app, KeyCode::Char('H'));
+        assert_eq!((app.cal_year, app.cal_month, app.cal_day), (year, month, 1));
+        press(&mut app, KeyCode::Char('L'));
+        assert_eq!((app.cal_year, app.cal_month), next);
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(
+            (app.cal_year, app.cal_month, app.cal_day),
+            (year, month, day)
+        );
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            (app.cal_year, app.cal_month, app.cal_day),
+            (year, month, day)
+        );
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.cal_day, 1);
+        assert_eq!(app.tab, Tab::Calendar);
+    }
+
+    #[test]
+    fn enter_on_a_calendar_event_selects_its_course_in_files() {
+        let mut app = calendar_app();
+        press(&mut app, KeyCode::Char('J'));
+        assert_eq!(app.cal_entry().unwrap().title, "Exam");
+        press(&mut app, KeyCode::Char('K'));
+        assert_eq!(app.cal_entry().unwrap().title, "Lab due");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tab, Tab::Files);
+        assert_eq!(app.pane, Pane::Sources);
+        assert_eq!(app.course_id(), Some("moodle:2"));
+        // A day without events only says so.
+        app.tab = Tab::Calendar;
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tab, Tab::Calendar);
+        assert_eq!(app.status, "no events on this day");
     }
 
     #[test]

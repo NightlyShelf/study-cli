@@ -10,6 +10,7 @@ use study_moodle::MoodleClient;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::app;
+use crate::tui::calendar::{self, CalEntry, Day};
 use crate::tui::reader::Reader;
 use crate::tui::tasks::Msg;
 use crate::tui::todo::{self, TodoRow};
@@ -66,6 +67,13 @@ pub struct App {
     pub todo_all: bool,
     /// How many rows `todo_all` would reveal.
     pub todo_hidden: usize,
+    /// The month shown in the Calendar tab and the selected day (1-based).
+    pub cal_year: i64,
+    pub cal_month: u32,
+    pub cal_day: u32,
+    /// Which of the selected day's events `Enter` and `o` act on.
+    pub cal_sel: usize,
+    pub cal_days: Vec<Day>,
     pub reader: Option<Reader>,
     /// Pages fetched this session, by node id, so reopening is instant.
     pub pages: HashMap<String, Reader>,
@@ -90,6 +98,7 @@ impl App {
         download_dir: PathBuf,
     ) -> App {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (cal_year, cal_month, cal_day) = calendar::civil(app::now());
         let mut app = App {
             config,
             index: Index::default(),
@@ -109,6 +118,11 @@ impl App {
             todo_sel: 0,
             todo_all: false,
             todo_hidden: 0,
+            cal_year,
+            cal_month,
+            cal_day,
+            cal_sel: 0,
+            cal_days: Vec::new(),
             reader: None,
             pages: HashMap::new(),
             status: String::new(),
@@ -145,6 +159,7 @@ impl App {
         self.course_sel = self.course_sel.min(self.courses.len().saturating_sub(1));
         self.rebuild_rows();
         self.rebuild_todo();
+        self.rebuild_calendar();
     }
 
     pub fn course_id(&self) -> Option<&str> {
@@ -161,6 +176,41 @@ impl App {
 
     pub fn todo_row(&self) -> Option<&TodoRow> {
         self.todo_rows.get(self.todo_sel)
+    }
+
+    pub fn cal_day(&self) -> Option<&Day> {
+        self.cal_days.get((self.cal_day as usize).saturating_sub(1))
+    }
+
+    pub fn cal_entry(&self) -> Option<&CalEntry> {
+        self.cal_day()?.events.get(self.cal_sel)
+    }
+
+    pub fn rebuild_calendar(&mut self) {
+        self.cal_days = calendar::month_days_with_events(
+            &self.index,
+            &self.config,
+            self.cal_year,
+            self.cal_month,
+        );
+        let events = self.cal_day().map_or(0, |day| day.events.len());
+        self.cal_sel = self.cal_sel.min(events.saturating_sub(1));
+    }
+
+    /// Selects a date, swapping the month's days in when it changes.
+    pub fn set_date(&mut self, year: i64, month: u32, day: u32) {
+        self.cal_day = day.clamp(1, calendar::month_days(year, month));
+        self.cal_sel = 0;
+        if (year, month) != (self.cal_year, self.cal_month) {
+            self.cal_year = year;
+            self.cal_month = month;
+            self.rebuild_calendar();
+        }
+    }
+
+    pub fn move_event_sel(&mut self, delta: isize) {
+        let events = self.cal_day().map_or(0, |day| day.events.len());
+        self.cal_sel = shifted(self.cal_sel, delta, events);
     }
 
     pub fn rebuild_todo(&mut self) {
@@ -274,6 +324,15 @@ pub mod tests {
         app
     }
 
+    /// `app()` on the Calendar tab with two events today (see
+    /// `calendar::tests`).
+    pub fn calendar_app() -> App {
+        let mut app = app();
+        app.replace_index(crate::tui::calendar::tests::calendar(app::now()));
+        app.tab = Tab::Calendar;
+        app
+    }
+
     #[test]
     fn new_opens_sections_of_the_first_course() {
         let app = app();
@@ -314,6 +373,27 @@ pub mod tests {
         app.todo_all = true;
         app.rebuild_todo();
         assert_eq!(app.todo_rows.len(), 2);
+    }
+
+    #[test]
+    fn calendar_opens_on_today_and_follows_set_date() {
+        let mut app = calendar_app();
+        let (year, month, day) = calendar::civil(app::now());
+        assert_eq!(
+            (app.cal_year, app.cal_month, app.cal_day),
+            (year, month, day)
+        );
+        assert_eq!(app.cal_days.len() as u32, calendar::month_days(year, month));
+        assert_eq!(app.cal_day().unwrap().events.len(), 2);
+        app.move_event_sel(5);
+        assert_eq!(app.cal_sel, 1);
+        assert_eq!(app.cal_entry().unwrap().title, "Exam");
+        // A day past the month's end clamps; a new month rebuilds the days.
+        app.set_date(2024, 2, 31);
+        assert_eq!((app.cal_year, app.cal_month, app.cal_day), (2024, 2, 29));
+        assert_eq!(app.cal_days.len(), 29);
+        assert_eq!(app.cal_sel, 0);
+        assert!(app.cal_entry().is_none());
     }
 
     #[test]

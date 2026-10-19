@@ -9,6 +9,7 @@ use ratatui::DefaultTerminal;
 
 use crate::app;
 
+mod calendar;
 mod draw;
 mod keys;
 mod reader;
