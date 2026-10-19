@@ -1,0 +1,3 @@
+[default.extend-words]
+# crate names typos mistakes for misspellings
+ratatui = "ratatui"

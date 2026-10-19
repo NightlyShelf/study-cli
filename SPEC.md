@@ -399,9 +399,11 @@ removing more complexity than it introduces is rejected.
   `cargo fmt --check` works on stable in CI and the hook).
 - **Lint:** `cargo clippy --all-targets -- -D warnings`. Lints are centralised
   in a `[workspace.lints]` table in the root `Cargo.toml` (so no scattered
-  `#![deny]` attributes): deny `warnings`, enable `clippy::all`; **not**
-  `clippy::pedantic` — it pushes toward noise that fights readability. Add
-  individual pedantic lints only if they prove useful.
+  `#![deny]` attributes): `clippy::all` at warn level plus
+  `unsafe_code = "forbid"`; the `-D warnings` on the hook/CI command line is
+  what turns warnings into failures, so a plain `cargo build` still works
+  mid-edit. **Not** `clippy::pedantic` — it pushes toward noise that fights
+  readability. Add individual pedantic lints only if they prove useful.
 - **Checks:** `cargo check --all-targets`, `cargo test`, and `typos` for
   spelling.
 - **Pre-commit:** a `.pre-commit-config.yaml` (the pre-commit framework) with
