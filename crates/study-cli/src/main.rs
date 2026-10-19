@@ -16,10 +16,11 @@ mod sync;
 mod teams_sync;
 mod todo;
 mod tui;
+mod whoami;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -106,6 +107,10 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Show both accounts, token health and the state of the index
+    Whoami,
+    /// Print a shell completion script (e.g. `study completions zsh`)
+    Completions { shell: clap_complete::Shell },
 }
 
 #[derive(Subcommand)]
@@ -150,5 +155,10 @@ async fn main() -> anyhow::Result<()> {
             submit,
             yes,
         } => put::run(&files, &to, submit, yes).await,
+        Command::Whoami => whoami::run().await,
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "study", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }
