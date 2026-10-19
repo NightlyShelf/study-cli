@@ -7,7 +7,7 @@ pub struct MoodleClient {
     /// Site root without a trailing slash, e.g. `https://moodle.example.edu`.
     pub base_url: String,
     pub token: String,
-    http: reqwest::Client,
+    pub(crate) http: reqwest::Client,
 }
 
 impl MoodleClient {

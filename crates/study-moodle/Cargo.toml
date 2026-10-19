@@ -17,4 +17,5 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { version = "1.53.3", features = ["fs"] }
 url = "2.5.8"

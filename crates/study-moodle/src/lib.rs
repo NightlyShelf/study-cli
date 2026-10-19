@@ -5,6 +5,7 @@ pub mod api;
 pub mod client;
 pub mod error;
 pub mod launch;
+pub mod upload;
 
 pub use client::MoodleClient;
 pub use error::{Error, Result};

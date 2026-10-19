@@ -6,6 +6,9 @@ pub enum Error {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
     /// The Moodle token is invalid or expired; the caller should re-login.
     #[error("moodle token expired: {0}")]
     TokenExpired(String),
