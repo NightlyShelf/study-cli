@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 
+#[derive(Clone)]
 pub struct MoodleClient {
     /// Site root without a trailing slash, e.g. `https://moodle.example.edu`.
     pub base_url: String,

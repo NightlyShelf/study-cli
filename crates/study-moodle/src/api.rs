@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-use crate::client::MoodleClient;
+use crate::client::{MoodleClient, list_param};
 use crate::error::Result;
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +82,25 @@ pub struct ContentsInfo {
     pub lastmodified: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct Page {
+    pub id: u64,
+    pub coursemodule: u64,
+    pub course: u64,
+    pub name: String,
+    #[serde(default)]
+    pub intro: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub timemodified: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PagesResponse {
+    pages: Vec<Page>,
+}
+
 impl MoodleClient {
     pub async fn site_info(&self) -> Result<SiteInfo> {
         let value = self.call("core_webservice_get_site_info", &[]).await?;
@@ -98,6 +117,19 @@ impl MoodleClient {
         let params = [("courseid", courseid.to_string())];
         let value = self.call("core_course_get_contents", &params).await?;
         Ok(serde_json::from_value(value)?)
+    }
+
+    /// Pages of the given courses; the reader looks one up by `coursemodule`.
+    pub async fn pages(&self, courseids: &[u64]) -> Result<Vec<Page>> {
+        let ids: Vec<String> = courseids.iter().map(u64::to_string).collect();
+        let owned = list_param("courseids", &ids);
+        let params: Vec<(&str, String)> = owned
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.clone()))
+            .collect();
+        let value = self.call("mod_page_get_pages_by_courses", &params).await?;
+        let response: PagesResponse = serde_json::from_value(value)?;
+        Ok(response.pages)
     }
 }
 
@@ -195,5 +227,30 @@ mod tests {
         let info: SiteInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.userid, 7);
         assert_eq!(info.functions[0].name, "core_course_get_contents");
+    }
+
+    #[test]
+    fn deserializes_pages_response() {
+        let json = r#"{"pages": [
+            {"id": 12, "coursemodule": 9912, "course": 4821, "name": "Syllabus",
+             "intro": "<p>Read me</p>", "content": "<h1>Welcome</h1>", "contentformat": 1,
+             "revision": 3, "timemodified": 1700000000},
+            {"id": 13, "coursemodule": 9913, "course": 4821, "name": "Grading",
+             "content": "<p>Weights</p>", "displayoptions": "a:1:{}"}
+        ], "warnings": []}"#;
+
+        let response: PagesResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.pages.len(), 2);
+        let syllabus = &response.pages[0];
+        assert_eq!(syllabus.coursemodule, 9912);
+        assert_eq!(syllabus.name, "Syllabus");
+        assert_eq!(syllabus.content, "<h1>Welcome</h1>");
+        assert_eq!(syllabus.timemodified, Some(1700000000));
+        let grading = &response.pages[1];
+        assert_eq!(grading.coursemodule, 9913);
+        assert_eq!(grading.name, "Grading");
+        assert_eq!(grading.content, "<p>Weights</p>");
+        assert_eq!(grading.intro, "");
+        assert_eq!(grading.timemodified, None);
     }
 }
