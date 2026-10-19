@@ -41,7 +41,8 @@ study login teams              device-code flow (section 5.2)
 study whoami                   show both accounts and token health
 study sync [--moodle|--teams]  refresh local index (incremental when possible)
 study ls [<course>[/<path>]]   list courses / folder contents from index
-study find <query...>          fuzzy search the index; single exact match downloads, else pick
+study find <query...>          search the index; single exact match downloads, else pick
+study alias <course> <alias>   set a course alias from the CLI (the TUI's `a` key does the same)
 study get <course>/<path>      download to cwd (or -o <dir>); tab-completable
 study put <file> --to <target> upload (section 7)
 study cal [--week|--month]     Moodle calendar
@@ -274,7 +275,10 @@ Sync:
   with `type == "file"` become `file` rows (`filename`, `fileurl`,
   `filesize`, `mimetype`, `timemodified`); `modname` maps to module kind
   (`resource`/`folder` → files, `url`/`page` → link recorded, not
-  downloadable). Module mtime = max file `timemodified`, else
+  downloadable). A `resource` is one document: keep only its main file
+  (`sortorder == 1`, else the first) — an HTML resource otherwise drags in its
+  `.js`/`.css`/`.png` support files (seen on the real site: 11 files for one
+  page). Module mtime = max file `timemodified`, else
   `contentsinfo.lastmodified`. This mtime feeds both incremental sync and the
   skip-if-identical download check. Full sync of ~10 courses < 5 s.
 - Teams: first sync does a one-time deep crawl — `me/joinedTeams` →
@@ -436,7 +440,7 @@ and index paths). No wall of prose; examples over explanation.
 |---|-------------|----------|
 | 0 | Auth: (a) Moodle mobile service confirmed enabled on the real site ✓; (b) Teams device-code with Teams client + `.default` confirmed viable via reference impl ✓ | both resolved |
 | 1 | Workspace scaffold: four crates compile, `rustfmt.toml`, `[workspace.lints]`, `.pre-commit-config.yaml`, PR-to-main CI, short README (§9.2–9.3) | done 2026-10-19 (`27f2134`) |
-| 2 | `login moodle`, `sync`, `ls`, `find`, `get` for Moodle | |
+| 2 | `login moodle`, `sync`, `ls`, `find`, `get` for Moodle | done 2026-10-19 (`d132979`); real-site run: 15 courses / 1447 files |
 | 3 | TUI Files tab (Moodle), aliases, reader overlay for pages | |
 | 4 | `put` for Moodle assignments; Todo tab | |
 | 5 | Calendar tab, `cal` | |
