@@ -186,6 +186,35 @@ struct RawFeedback {
     gradefordisplay: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CalendarEvent {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// 0 for site and user events.
+    #[serde(default)]
+    pub courseid: u64,
+    /// `assign`, `quiz`, …; `None` for site, course and user events.
+    #[serde(default)]
+    pub modulename: Option<String>,
+    #[serde(default)]
+    pub instance: Option<u64>,
+    /// `due` | `open` | `close` | `course` | `user` | `site` | …
+    #[serde(default)]
+    pub eventtype: String,
+    pub timestart: u64,
+    #[serde(default)]
+    pub timeduration: u64,
+    #[serde(default)]
+    pub visible: u8,
+}
+
+#[derive(Deserialize)]
+struct CalendarResponse {
+    events: Vec<CalendarEvent>,
+}
+
 #[derive(Deserialize)]
 struct Warning {
     #[serde(default)]
@@ -247,6 +276,31 @@ impl MoodleClient {
         Ok(pick_status(raw))
     }
 
+    /// Calendar events of the given courses, plus the user's own and the
+    /// site-wide ones, starting within `from..=to` (unix seconds).
+    pub async fn calendar_events(
+        &self,
+        courseids: &[u64],
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<CalendarEvent>> {
+        let ids: Vec<String> = courseids.iter().map(u64::to_string).collect();
+        let owned = list_param("events[courseids]", &ids);
+        let mut params: Vec<(&str, String)> = owned
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.clone()))
+            .collect();
+        params.push(("options[timestart]", from.to_string()));
+        params.push(("options[timeend]", to.to_string()));
+        params.push(("options[userevents]", "1".to_string()));
+        params.push(("options[siteevents]", "1".to_string()));
+        let value = self
+            .call("core_calendar_get_calendar_events", &params)
+            .await?;
+        let response: CalendarResponse = serde_json::from_value(value)?;
+        Ok(clear_empty_modulename(response.events))
+    }
+
     /// Attaches the draft area to the assignment's file submission (a draft, not yet submitted).
     pub async fn save_submission(&self, assignid: u64, itemid: u64) -> Result<()> {
         let params = [
@@ -302,6 +356,16 @@ fn pick_status(raw: RawStatus) -> SubmissionStatus {
         submitted_at: submission.timemodified,
         grade,
     }
+}
+
+/// Moodle sends `modulename: ""` (not null) on events without a module.
+fn clear_empty_modulename(mut events: Vec<CalendarEvent>) -> Vec<CalendarEvent> {
+    for event in &mut events {
+        if event.modulename.as_deref() == Some("") {
+            event.modulename = None;
+        }
+    }
+    events
 }
 
 /// The save/submit functions answer with a warnings array instead of an
@@ -521,6 +585,42 @@ mod tests {
         let status = pick_status(serde_json::from_str(json).unwrap());
         assert_eq!(status.status.as_deref(), Some("new"));
         assert_eq!(status.grade, None);
+    }
+
+    #[test]
+    fn calendar_events_clear_empty_modulename() {
+        let json = r#"{"events": [
+            {"id": 1, "name": "Kolokwium 1", "description": "<p>Room 101</p>", "format": 1,
+             "courseid": 7, "categoryid": 0, "groupid": 0, "userid": 0, "repeatid": 0,
+             "modulename": "quiz", "instance": 33, "eventtype": "close",
+             "timestart": 1700000000, "timeduration": 3600, "visible": 1, "uuid": "",
+             "sequence": 1, "subscriptionid": null},
+            {"id": 2, "name": "Dean's hours", "courseid": 0, "modulename": "",
+             "instance": 0, "eventtype": "site", "timestart": 1700100000,
+             "timeduration": 0, "visible": 1, "overrides": []}
+        ], "warnings": []}"#;
+
+        let response: CalendarResponse = serde_json::from_str(json).unwrap();
+        let events = clear_empty_modulename(response.events);
+
+        assert_eq!(events.len(), 2);
+        let quiz = &events[0];
+        assert_eq!(quiz.id, 1);
+        assert_eq!(quiz.name, "Kolokwium 1");
+        assert_eq!(quiz.description, "<p>Room 101</p>");
+        assert_eq!(quiz.courseid, 7);
+        assert_eq!(quiz.modulename.as_deref(), Some("quiz"));
+        assert_eq!(quiz.instance, Some(33));
+        assert_eq!(quiz.eventtype, "close");
+        assert_eq!(quiz.timestart, 1700000000);
+        assert_eq!(quiz.timeduration, 3600);
+        assert_eq!(quiz.visible, 1);
+
+        let site = &events[1];
+        assert_eq!(site.courseid, 0);
+        assert_eq!(site.modulename, None);
+        assert_eq!(site.eventtype, "site");
+        assert_eq!(site.timeduration, 0);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use study_core::config::Config;
 use study_core::index::{Event, EventKind, File, Index, Node, NodeKind, Source, SourceKind};
 use study_moodle::MoodleClient;
 use study_moodle::api::{
-    Assignment, Attachment, Content, Course, Module, Section, SubmissionStatus,
+    Assignment, Attachment, CalendarEvent, Content, Course, Module, Section, SubmissionStatus,
 };
 use tokio::task::JoinSet;
 
@@ -20,6 +20,11 @@ use crate::app;
 pub const TODO_PAST_SECS: u64 = 14 * 86_400;
 
 const STATUS_IN_FLIGHT: usize = 8;
+
+/// The calendar window: last week, so a just-missed event still shows, and
+/// the next three months, which covers a semester's exam dates.
+const CALENDAR_PAST_SECS: u64 = 7 * 86_400;
+const CALENDAR_FUTURE_SECS: u64 = 90 * 86_400;
 
 pub async fn run() -> Result<()> {
     let config = app::load_config()?;
@@ -73,19 +78,25 @@ pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
         files.extend(map_handouts(assignment, &nodes));
     }
     let statuses = submission_statuses(&client, &assignments, app::now(), quiet).await;
-    let events: Vec<Event> = assignments
+    let mut events: Vec<Event> = assignments
         .iter()
         .map(|assignment| {
             map_assignment(&client.base_url, assignment, statuses.get(&assignment.id))
         })
         .collect();
+
+    spinner.set_message("calendar");
+    let calendar = calendar_events(&client, &course_ids, app::now(), quiet).await;
+    let calendar_count = calendar.len();
+    events.extend(calendar);
     spinner.finish_and_clear();
     if !quiet {
         eprintln!(
-            "synced {} courses, {} files, {} assignments",
+            "synced {} courses, {} files, {} assignments, {} events",
             courses.len(),
             files.len(),
-            assignments.len()
+            assignments.len(),
+            calendar_count
         );
     }
 
@@ -100,6 +111,58 @@ pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
     index.replace_source(source, nodes, files, events);
     app::save_index(&index)?;
     Ok(index)
+}
+
+/// Visible calendar events around now, as index rows. A site can have its
+/// calendar disabled, so a failed call only loses the events, never the sync.
+async fn calendar_events(
+    client: &MoodleClient,
+    course_ids: &[u64],
+    now: u64,
+    quiet: bool,
+) -> Vec<Event> {
+    let from = now.saturating_sub(CALENDAR_PAST_SECS);
+    let result = client
+        .calendar_events(course_ids, from, now + CALENDAR_FUTURE_SECS)
+        .await;
+    let raw = match result {
+        Ok(raw) => raw,
+        Err(err) => {
+            if !quiet {
+                eprintln!("warning: no calendar events: {err}");
+            }
+            return Vec::new();
+        }
+    };
+    raw.iter()
+        .filter(|event| event.visible != 0)
+        .map(|event| map_calendar_event(&client.base_url, event))
+        .collect()
+}
+
+/// The index row for one calendar event. A `due`-type event for an
+/// assignment stays next to the assignment's own coursework row: it is
+/// still a calendar entry.
+pub fn map_calendar_event(base_url: &str, event: &CalendarEvent) -> Event {
+    Event {
+        id: format!("moodle:cal:{}", event.id),
+        source: SourceKind::Moodle,
+        kind: EventKind::Calendar,
+        title: event.name.clone(),
+        start: Some(event.timestart),
+        due: (event.timeduration > 0).then(|| event.timestart + event.timeduration),
+        course_id: (event.courseid > 0).then(|| format!("moodle:{}", event.courseid)),
+        cmid: None,
+        // `status` carries Moodle's `eventtype` (`due`, `open`, `close`,
+        // `course`, `user`…): the struct has no better field and the
+        // calendar views show it.
+        status: Some(event.eventtype.clone()),
+        grade: None,
+        url: Some(format!(
+            "{base_url}/calendar/view.php?view=day&time={}",
+            event.timestart
+        )),
+    }
 }
 
 /// One `mod_assign_get_submission_status` call per assignment that is not
@@ -686,6 +749,49 @@ mod tests {
             files[0].download_url,
             "https://moodle.test/webservice/pluginfile.php/1/hw.pdf"
         );
+    }
+
+    fn calendar_event(id: u64, courseid: u64, timeduration: u64, eventtype: &str) -> CalendarEvent {
+        CalendarEvent {
+            id,
+            name: format!("Event {id}"),
+            description: String::new(),
+            courseid,
+            modulename: None,
+            instance: None,
+            eventtype: eventtype.to_string(),
+            timestart: 1_700_000_000,
+            timeduration,
+            visible: 1,
+        }
+    }
+
+    #[test]
+    fn maps_calendar_event() {
+        let event = map_calendar_event("https://moodle.test", &calendar_event(9, 7, 3600, "close"));
+
+        assert_eq!(event.id, "moodle:cal:9");
+        assert_eq!(event.source, SourceKind::Moodle);
+        assert_eq!(event.kind, EventKind::Calendar);
+        assert_eq!(event.title, "Event 9");
+        assert_eq!(event.start, Some(1_700_000_000));
+        assert_eq!(event.due, Some(1_700_003_600));
+        assert_eq!(event.course_id.as_deref(), Some("moodle:7"));
+        assert_eq!(event.cmid, None);
+        assert_eq!(event.status.as_deref(), Some("close"));
+        assert_eq!(event.grade, None);
+        assert_eq!(
+            event.url.as_deref(),
+            Some("https://moodle.test/calendar/view.php?view=day&time=1700000000")
+        );
+    }
+
+    #[test]
+    fn maps_calendar_event_without_duration_or_course() {
+        let event = map_calendar_event("https://moodle.test", &calendar_event(10, 0, 0, "user"));
+        assert_eq!(event.due, None);
+        assert_eq!(event.course_id, None);
+        assert_eq!(event.status.as_deref(), Some("user"));
     }
 
     #[test]

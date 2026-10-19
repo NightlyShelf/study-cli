@@ -40,7 +40,7 @@ pub fn todo_rows(index: &Index, config: &Config, now: u64, all: bool) -> Vec<Vec
                     .due
                     .map_or("-".to_string(), |due| human_until(due, now)),
                 status_cell(event),
-                course_cell(index, config, event),
+                course_cell(index, config, event, 30),
                 event.title.clone(),
             ]
         })
@@ -64,8 +64,8 @@ fn status_cell(event: &Event) -> String {
     }
 }
 
-/// The course alias when set, else its name cut to 30 characters.
-fn course_cell(index: &Index, config: &Config, event: &Event) -> String {
+/// The course alias when set, else its name cut to `width` characters.
+pub fn course_cell(index: &Index, config: &Config, event: &Event, width: usize) -> String {
     let Some(course_id) = event.course_id.as_deref() else {
         return String::new();
     };
@@ -75,7 +75,7 @@ fn course_cell(index: &Index, config: &Config, event: &Event) -> String {
     let Some(course) = index.node(course_id) else {
         return String::new();
     };
-    course.name.chars().take(30).collect()
+    course.name.chars().take(width).collect()
 }
 
 #[cfg(test)]

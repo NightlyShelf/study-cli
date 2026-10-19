@@ -2,6 +2,7 @@
 
 mod alias;
 mod app;
+mod cal;
 mod download;
 mod find;
 mod fmt;
@@ -74,6 +75,15 @@ enum Command {
         #[arg(long)]
         overwrite: bool,
     },
+    /// Show calendar events by day
+    Cal {
+        /// The next 7 days (the default)
+        #[arg(long, conflicts_with = "month")]
+        week: bool,
+        /// The next 31 days
+        #[arg(long)]
+        month: bool,
+    },
     /// List assignments by due date
     Todo {
         /// Include submitted, graded and long-past assignments
@@ -126,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
             force,
             overwrite,
         } => get::run(&reference, dir, force, overwrite).await,
+        Command::Cal { week: _, month } => cal::run(month).await,
         Command::Todo { all } => todo::run(all).await,
         Command::Put {
             files,

@@ -83,6 +83,12 @@ fn span(secs: u64) -> Option<String> {
     }
 }
 
+/// `Mon`…`Sun` from unix seconds; day 0 (1970-01-01) was a Thursday.
+pub fn weekday(secs: u64) -> &'static str {
+    const NAMES: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    NAMES[(secs / 86_400 % 7) as usize]
+}
+
 /// `YYYY-MM-DD` from unix seconds. The arithmetic is Howard Hinnant's
 /// `civil_from_days`, which saves a date crate for one column.
 pub fn date(secs: u64) -> String {
@@ -140,6 +146,15 @@ mod tests {
         assert_eq!(human_until(now - 2 * 86_400, now), "2d ago");
         assert_eq!(human_until(now - 90 * 86_400, now), "2023-08-16");
         assert_eq!(human_until(now + 90 * 86_400, now), "2024-02-12");
+    }
+
+    #[test]
+    fn weekdays() {
+        assert_eq!(weekday(0), "Thu");
+        assert_eq!(weekday(86_399), "Thu");
+        assert_eq!(weekday(86_400), "Fri");
+        assert_eq!(weekday(951_782_400), "Tue"); // 2000-02-29
+        assert_eq!(weekday(1_700_000_000), "Tue"); // 2023-11-14
     }
 
     #[test]
