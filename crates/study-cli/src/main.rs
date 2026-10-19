@@ -10,7 +10,9 @@ mod handler;
 mod login;
 mod ls;
 mod path;
+mod put;
 mod sync;
+mod todo;
 mod tui;
 
 use std::path::PathBuf;
@@ -72,6 +74,27 @@ enum Command {
         #[arg(long)]
         overwrite: bool,
     },
+    /// List assignments by due date
+    Todo {
+        /// Include submitted, graded and long-past assignments
+        #[arg(long)]
+        all: bool,
+    },
+    /// Upload files to a Moodle assignment as a draft submission
+    Put {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// `<course>/<assignment>`; a course alias, id or name prefix,
+        /// then the assignment title or a prefix of it
+        #[arg(long)]
+        to: String,
+        /// Also submit for grading (usually irreversible; asks first)
+        #[arg(long)]
+        submit: bool,
+        /// Skip the submit confirmation
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -103,5 +126,12 @@ async fn main() -> anyhow::Result<()> {
             force,
             overwrite,
         } => get::run(&reference, dir, force, overwrite).await,
+        Command::Todo { all } => todo::run(all).await,
+        Command::Put {
+            files,
+            to,
+            submit,
+            yes,
+        } => put::run(&files, &to, submit, yes).await,
     }
 }

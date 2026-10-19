@@ -92,7 +92,7 @@ fn step<'a>(index: &'a Index, node: &Node, segment: &str, last: bool) -> Vec<Tar
 
 /// Indices of the names matching `query` case-insensitively: exact matches
 /// if there are any, otherwise prefix matches.
-fn matching(names: &[&str], query: &str) -> Vec<usize> {
+pub(crate) fn matching(names: &[&str], query: &str) -> Vec<usize> {
     let query = query.to_lowercase();
     let lower: Vec<String> = names.iter().map(|name| name.to_lowercase()).collect();
     let exact: Vec<usize> = (0..names.len()).filter(|&i| lower[i] == query).collect();

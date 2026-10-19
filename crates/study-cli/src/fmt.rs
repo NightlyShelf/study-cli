@@ -52,13 +52,34 @@ pub fn human_age(mtime: Option<u64>, now: u64) -> String {
     let Some(mtime) = mtime else {
         return "-".to_string();
     };
-    let age = now.saturating_sub(mtime);
-    match age {
-        0..3600 => format!("{}m", age / 60),
-        3600..86_400 => format!("{}h", age / 3600),
-        86_400..1_209_600 => format!("{}d", age / 86_400),
-        1_209_600..5_184_000 => format!("{}w", age / 604_800),
-        _ => date(mtime),
+    match span(now.saturating_sub(mtime)) {
+        Some(span) => span,
+        None => date(mtime),
+    }
+}
+
+/// `in 3d`, `in 5h`, `2d ago`, then a plain date either way.
+pub fn human_until(due: u64, now: u64) -> String {
+    if due >= now {
+        return match span(due - now) {
+            Some(span) => format!("in {span}"),
+            None => date(due),
+        };
+    }
+    match span(now - due) {
+        Some(span) => format!("{span} ago"),
+        None => date(due),
+    }
+}
+
+/// `5m`, `3h`, `3d`, `2w`; `None` beyond 60 days, where a date reads better.
+fn span(secs: u64) -> Option<String> {
+    match secs {
+        0..3600 => Some(format!("{}m", secs / 60)),
+        3600..86_400 => Some(format!("{}h", secs / 3600)),
+        86_400..1_209_600 => Some(format!("{}d", secs / 86_400)),
+        1_209_600..5_184_000 => Some(format!("{}w", secs / 604_800)),
+        _ => None,
     }
 }
 
@@ -107,6 +128,18 @@ mod tests {
         assert_eq!(human_age(Some(now - 3 * 86_400), now), "3d");
         assert_eq!(human_age(Some(now - 15 * 86_400), now), "2w");
         assert_eq!(human_age(Some(0), now), "1970-01-01");
+    }
+
+    #[test]
+    fn due_in() {
+        let now = 1_700_000_000;
+        assert_eq!(human_until(now + 300, now), "in 5m");
+        assert_eq!(human_until(now + 5 * 3600, now), "in 5h");
+        assert_eq!(human_until(now + 3 * 86_400, now), "in 3d");
+        assert_eq!(human_until(now + 20 * 86_400, now), "in 2w");
+        assert_eq!(human_until(now - 2 * 86_400, now), "2d ago");
+        assert_eq!(human_until(now - 90 * 86_400, now), "2023-08-16");
+        assert_eq!(human_until(now + 90 * 86_400, now), "2024-02-12");
     }
 
     #[test]

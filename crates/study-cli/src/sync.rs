@@ -1,15 +1,25 @@
 //! `study sync` — crawl Moodle into the index (SPEC §6).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use indicatif::ProgressBar;
 use study_core::config::Config;
-use study_core::index::{File, Index, Node, NodeKind, Source, SourceKind};
-use study_moodle::api::{Content, Course, Module, Section};
+use study_core::index::{Event, EventKind, File, Index, Node, NodeKind, Source, SourceKind};
+use study_moodle::MoodleClient;
+use study_moodle::api::{
+    Assignment, Attachment, Content, Course, Module, Section, SubmissionStatus,
+};
+use tokio::task::JoinSet;
 
 use crate::app;
+
+/// Submission status is fetched per assignment; past this age the user no
+/// longer cares, and skipping it keeps sync fast on long-running sites.
+pub const TODO_PAST_SECS: u64 = 14 * 86_400;
+
+const STATUS_IN_FLIGHT: usize = 8;
 
 pub async fn run() -> Result<()> {
     let config = app::load_config()?;
@@ -52,9 +62,31 @@ pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
         nodes.extend(course_nodes);
         files.extend(course_files);
     }
+
+    spinner.set_message("assignments");
+    let course_ids: Vec<u64> = courses.iter().map(|course| course.id).collect();
+    let assignments = client
+        .assignments(&course_ids)
+        .await
+        .context("listing assignments")?;
+    for assignment in &assignments {
+        files.extend(map_handouts(assignment, &nodes));
+    }
+    let statuses = submission_statuses(&client, &assignments, app::now(), quiet).await;
+    let events: Vec<Event> = assignments
+        .iter()
+        .map(|assignment| {
+            map_assignment(&client.base_url, assignment, statuses.get(&assignment.id))
+        })
+        .collect();
     spinner.finish_and_clear();
     if !quiet {
-        eprintln!("synced {} courses, {} files", courses.len(), files.len());
+        eprintln!(
+            "synced {} courses, {} files, {} assignments",
+            courses.len(),
+            files.len(),
+            assignments.len()
+        );
     }
 
     let mut index = app::load_index()?;
@@ -65,9 +97,133 @@ pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
         last_sync: Some(app::now()),
         delta_token: None,
     };
-    index.replace_source(source, nodes, files, Vec::new());
+    index.replace_source(source, nodes, files, events);
     app::save_index(&index)?;
     Ok(index)
+}
+
+/// One `mod_assign_get_submission_status` call per assignment that is not
+/// long past, at most [`STATUS_IN_FLIGHT`] at a time. A failed call only
+/// loses that assignment's status, never the sync.
+async fn submission_statuses(
+    client: &MoodleClient,
+    assignments: &[Assignment],
+    now: u64,
+    quiet: bool,
+) -> HashMap<u64, SubmissionStatus> {
+    let mut pending = JoinSet::new();
+    let mut statuses = HashMap::new();
+    for assignment in assignments {
+        if !is_current(assignment.duedate, now) {
+            continue;
+        }
+        if pending.len() >= STATUS_IN_FLIGHT
+            && let Some(joined) = pending.join_next().await
+        {
+            record_status(joined, &mut statuses, quiet);
+        }
+        let client = client.clone();
+        let id = assignment.id;
+        let name = assignment.name.clone();
+        pending.spawn(async move { (id, name, client.submission_status(id).await) });
+    }
+    while let Some(joined) = pending.join_next().await {
+        record_status(joined, &mut statuses, quiet);
+    }
+    statuses
+}
+
+type StatusResult = (u64, String, study_moodle::Result<SubmissionStatus>);
+
+fn record_status(
+    joined: std::result::Result<StatusResult, tokio::task::JoinError>,
+    statuses: &mut HashMap<u64, SubmissionStatus>,
+    quiet: bool,
+) {
+    // A join error means the task panicked; nothing to record.
+    let Ok((id, name, result)) = joined else {
+        return;
+    };
+    match result {
+        Ok(status) => {
+            statuses.insert(id, status);
+        }
+        Err(err) if !quiet => eprintln!("warning: no submission status for '{name}': {err}"),
+        Err(_) => {}
+    }
+}
+
+/// True unless the due date is more than [`TODO_PAST_SECS`] ago; an
+/// assignment without a due date is always current.
+pub fn is_current(due: Option<u64>, now: u64) -> bool {
+    match due {
+        Some(due) => due + TODO_PAST_SECS >= now,
+        None => true,
+    }
+}
+
+/// The index row for one assignment. `status` is `None` when its submission
+/// status was not fetched (too old, or the call failed).
+pub fn map_assignment(
+    base_url: &str,
+    assignment: &Assignment,
+    status: Option<&SubmissionStatus>,
+) -> Event {
+    Event {
+        id: format!("moodle:assign:{}", assignment.id),
+        source: SourceKind::Moodle,
+        kind: EventKind::Coursework,
+        title: assignment.name.clone(),
+        // Moodle stores "no date" as 0 (the api already clears `duedate`).
+        start: assignment.allowsubmissionsfromdate.filter(|&at| at != 0),
+        due: assignment.duedate.filter(|&at| at != 0),
+        course_id: Some(format!("moodle:{}", assignment.course)),
+        cmid: Some(assignment.cmid.to_string()),
+        status: status.map(submission_state),
+        grade: status.and_then(|status| status.grade.clone()),
+        url: Some(format!(
+            "{base_url}/mod/assign/view.php?id={}",
+            assignment.cmid
+        )),
+    }
+}
+
+/// `new` | `draft` | `submitted` | `graded`, as `todo` shows it.
+pub fn submission_state(status: &SubmissionStatus) -> String {
+    if status.grade.is_some() {
+        return "graded".to_string();
+    }
+    status.status.clone().unwrap_or_else(|| "new".to_string())
+}
+
+/// Handouts go on the assignment's module node so they show up in `find`
+/// and `get`. A hidden module has no node, and then its handouts stay out.
+pub fn map_handouts(assignment: &Assignment, nodes: &[Node]) -> Vec<File> {
+    let node_id = format!("moodle:mod:{}", assignment.cmid);
+    if !nodes.iter().any(|node| node.id == node_id) {
+        return Vec::new();
+    }
+    assignment
+        .introattachments
+        .iter()
+        .filter_map(|attachment| map_attachment(assignment.cmid, &node_id, attachment))
+        .collect()
+}
+
+/// A handout has the same fields as a module content minus `type` and
+/// `sortorder`, so it takes the same route as every other file.
+fn map_attachment(cmid: u64, node_id: &str, attachment: &Attachment) -> Option<File> {
+    let content = Content {
+        kind: "file".to_string(),
+        filename: attachment.filename.clone(),
+        filepath: attachment.filepath.clone(),
+        filesize: attachment.filesize,
+        fileurl: attachment.fileurl.clone(),
+        mimetype: attachment.mimetype.clone(),
+        timemodified: attachment.timemodified,
+        sortorder: None,
+    };
+    map_file(cmid, node_id, &content)
 }
 
 /// Pure mapping from one course's API payload to index rows. Node ids never
@@ -431,6 +587,114 @@ mod tests {
             .map(|f| (f.name.as_str(), f.node.as_str()))
             .collect();
         assert_eq!(names, [("lecture5.pdf", "moodle:mod:301")]);
+    }
+
+    fn assignment(id: u64, cmid: u64, duedate: Option<u64>) -> Assignment {
+        Assignment {
+            id,
+            cmid,
+            course: 7,
+            name: format!("Homework {id}"),
+            duedate,
+            allowsubmissionsfromdate: Some(0),
+            intro: String::new(),
+            introattachments: vec![Attachment {
+                filename: "hw.pdf".to_string(),
+                filepath: Some("/".to_string()),
+                filesize: Some(1234),
+                fileurl: Some("https://moodle.test/webservice/pluginfile.php/1/hw.pdf".to_string()),
+                mimetype: Some("application/pdf".to_string()),
+                timemodified: Some(1_699_000_000),
+            }],
+        }
+    }
+
+    #[test]
+    fn maps_assignment_without_status() {
+        let mut assignment = assignment(55, 9912, Some(1_700_000_000));
+        assignment.allowsubmissionsfromdate = Some(1_690_000_000);
+        let event = map_assignment("https://moodle.test", &assignment, None);
+
+        assert_eq!(event.id, "moodle:assign:55");
+        assert_eq!(event.source, SourceKind::Moodle);
+        assert_eq!(event.kind, EventKind::Coursework);
+        assert_eq!(event.title, "Homework 55");
+        assert_eq!(event.start, Some(1_690_000_000));
+        assert_eq!(event.due, Some(1_700_000_000));
+        assert_eq!(event.course_id.as_deref(), Some("moodle:7"));
+        assert_eq!(event.cmid.as_deref(), Some("9912"));
+        assert_eq!(event.status, None);
+        assert_eq!(event.grade, None);
+        assert_eq!(
+            event.url.as_deref(),
+            Some("https://moodle.test/mod/assign/view.php?id=9912")
+        );
+    }
+
+    #[test]
+    fn maps_assignment_status_and_zero_dates() {
+        let assignment = assignment(56, 9913, None);
+        let draft = SubmissionStatus {
+            status: Some("draft".to_string()),
+            ..SubmissionStatus::default()
+        };
+        let event = map_assignment("https://moodle.test", &assignment, Some(&draft));
+        assert_eq!(event.start, None);
+        assert_eq!(event.due, None);
+        assert_eq!(event.status.as_deref(), Some("draft"));
+
+        let graded = SubmissionStatus {
+            status: Some("submitted".to_string()),
+            submitted_at: Some(1),
+            grade: Some("85.00 / 100.00".to_string()),
+        };
+        let event = map_assignment("https://moodle.test", &assignment, Some(&graded));
+        assert_eq!(event.status.as_deref(), Some("graded"));
+        assert_eq!(event.grade.as_deref(), Some("85.00 / 100.00"));
+
+        let untouched = SubmissionStatus::default();
+        let event = map_assignment("https://moodle.test", &assignment, Some(&untouched));
+        assert_eq!(event.status.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn handouts_attach_to_the_module_node() {
+        let (course, sections) = fixture();
+        let (mut nodes, _) = map_course("https://moodle.test", &course, &sections);
+        let assignment = assignment(55, 9912, None);
+        assert!(map_handouts(&assignment, &nodes).is_empty());
+
+        nodes.push(Node {
+            id: "moodle:mod:9912".to_string(),
+            source: SourceKind::Moodle,
+            parent: Some("moodle:sec:10".to_string()),
+            kind: NodeKind::Module,
+            modname: Some("assign".to_string()),
+            name: "Homework 55".to_string(),
+            remote_id: "9912".to_string(),
+            web_url: None,
+        });
+        let files = map_handouts(&assignment, &nodes);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, "moodle:file:9912:/hw.pdf");
+        assert_eq!(files[0].node, "moodle:mod:9912");
+        assert_eq!(files[0].name, "hw.pdf");
+        assert_eq!(files[0].size, Some(1234));
+        assert_eq!(files[0].mtime, Some(1_699_000_000));
+        assert_eq!(files[0].mime.as_deref(), Some("application/pdf"));
+        assert_eq!(
+            files[0].download_url,
+            "https://moodle.test/webservice/pluginfile.php/1/hw.pdf"
+        );
+    }
+
+    #[test]
+    fn current_assignments() {
+        let now = 1_700_000_000;
+        assert!(is_current(None, now));
+        assert!(is_current(Some(now + 1), now));
+        assert!(is_current(Some(now - TODO_PAST_SECS), now));
+        assert!(!is_current(Some(now - TODO_PAST_SECS - 1), now));
     }
 
     #[test]
