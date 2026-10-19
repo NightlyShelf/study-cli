@@ -464,7 +464,7 @@ and index paths). No wall of prose; examples over explanation.
 | 4 | `put` for Moodle assignments; Todo tab | done 2026-10-19; real sync 15 courses / 326 files / 70 assignments in 4.7 s |
 | 5 | Calendar tab, `cal` | done 2026-10-19 (times shown in UTC; no date crate) |
 | 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | implemented 2026-10-19; awaiting the first real `login teams` |
-| 7 | Shell completions, incremental sync, polish | |
+| 7 | Shell completions, `whoami`, incremental sync, polish | completions + whoami done 2026-10-19; Teams `delta` sync pending |
 
 ## 11. API reference (grounded in the reference impl)
 
