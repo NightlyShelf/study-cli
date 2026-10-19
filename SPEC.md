@@ -305,6 +305,10 @@ Sync:
   A team with a single (General) channel is flattened: its channel node is
   dropped and its files/messages attach directly to the course node (§4.2).
   Teams with extra channels keep per-channel folder nodes.
+  Index convention: Teams nodes carry `<driveId>/<itemId>` in `remote_id`
+  (a flattened Team, a Channel, a Folder) and the messages entry carries
+  `<teamId>/<channelId>`; files store the Graph `…/content` url. v1 does a
+  full crawl each sync; `delta` arrives with milestone 7.
 
 ## 7. Transfers
 
@@ -459,7 +463,7 @@ and index paths). No wall of prose; examples over explanation.
 | 3 | TUI Files tab (Moodle), aliases, reader overlay for pages | done 2026-10-19 |
 | 4 | `put` for Moodle assignments; Todo tab | done 2026-10-19; real sync 15 courses / 326 files / 70 assignments in 4.7 s |
 | 5 | Calendar tab, `cal` | done 2026-10-19 (times shown in UTC; no date crate) |
-| 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | |
+| 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | implemented 2026-10-19; awaiting the first real `login teams` |
 | 7 | Shell completions, incremental sync, polish | |
 
 ## 11. API reference (grounded in the reference impl)
