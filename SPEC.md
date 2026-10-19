@@ -457,7 +457,7 @@ and index paths). No wall of prose; examples over explanation.
 | 1 | Workspace scaffold: four crates compile, `rustfmt.toml`, `[workspace.lints]`, `.pre-commit-config.yaml`, PR-to-main CI, short README (§9.2–9.3) | done 2026-10-19 (`27f2134`) |
 | 2 | `login moodle`, `sync`, `ls`, `find`, `get` for Moodle | done 2026-10-19 (`d132979`); real-site run: 15 courses / 1447 files |
 | 3 | TUI Files tab (Moodle), aliases, reader overlay for pages | done 2026-10-19 |
-| 4 | `put` for Moodle assignments; Todo tab | |
+| 4 | `put` for Moodle assignments; Todo tab | done 2026-10-19; real sync 15 courses / 326 files / 70 assignments in 4.7 s |
 | 5 | Calendar tab, `cal` | |
 | 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | |
 | 7 | Shell completions, incremental sync, polish | |
