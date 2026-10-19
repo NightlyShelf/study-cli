@@ -458,7 +458,7 @@ and index paths). No wall of prose; examples over explanation.
 | 2 | `login moodle`, `sync`, `ls`, `find`, `get` for Moodle | done 2026-10-19 (`d132979`); real-site run: 15 courses / 1447 files |
 | 3 | TUI Files tab (Moodle), aliases, reader overlay for pages | done 2026-10-19 |
 | 4 | `put` for Moodle assignments; Todo tab | done 2026-10-19; real sync 15 courses / 326 files / 70 assignments in 4.7 s |
-| 5 | Calendar tab, `cal` | |
+| 5 | Calendar tab, `cal` | done 2026-10-19 (times shown in UTC; no date crate) |
 | 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | |
 | 7 | Shell completions, incremental sync, polish | |
 
@@ -492,7 +492,7 @@ Microsoft Graph (v1.0) endpoints:
 | channel files folder | `GET /teams/{id}/channels/{cid}/filesFolder`      |
 | channel messages     | `GET /teams/{id}/channels/{cid}/messages?$expand=replies` |
 | folder children      | `GET /drives/{d}/items/{id}/children`             |
-| incremental          | `GET /drives/{d}/root/delta`                       |
+| incremental          | `GET /drives/{d}/items/{folder}/delta` (per channel) |
 | download             | `GET /drives/{d}/items/{id}/content` (302)        |
 | small upload         | `PUT /drives/{d}/items/{p}:/{name}:/content`      |
 | large upload         | `POST …/createUploadSession` + 5 MiB chunks       |
