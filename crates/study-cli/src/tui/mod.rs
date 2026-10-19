@@ -25,7 +25,8 @@ pub async fn run() -> Result<()> {
     let index = app::load_index()?;
     // Not being logged in is fine for browsing; the first network action says so.
     let client = app::moodle_client(&config).ok();
-    let mut app = App::new(config, index, client, std::env::current_dir()?);
+    let graph = app::graph_client(&config).ok();
+    let mut app = App::new(config, index, client, graph, std::env::current_dir()?);
     if app.index.is_stale(app::STALE_AFTER_SECS, app::now()) {
         tasks::spawn_sync(&mut app);
     }

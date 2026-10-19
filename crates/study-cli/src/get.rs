@@ -21,21 +21,26 @@ pub async fn run(
         None => std::env::current_dir()?,
     };
 
-    let client = app::moodle_client(&config)?;
-    let node = match path::resolve(&index, &config, reference)? {
-        Target::File(file) => {
-            download::download(&client, file, &dir, force, overwrite, false).await?;
-            return Ok(());
+    // Either source may be missing; `fetch` complains only when a file needs it.
+    let moodle = app::moodle_client(&config).ok();
+    let graph = app::graph_client(&config).ok();
+    let targets = match path::resolve(&index, &config, reference)? {
+        Target::File(file) => vec![(file, PathBuf::new())],
+        Target::Node(node) => {
+            if node.kind == NodeKind::Course {
+                bail!(
+                    "'{reference}' is a whole course — pick a section or folder (see `study ls {reference}`)"
+                );
+            }
+            files_under(&index, node)
         }
-        Target::Node(node) => node,
     };
-    if node.kind == NodeKind::Course {
-        bail!(
-            "'{reference}' is a whole course — pick a section or folder (see `study ls {reference}`)"
-        );
+    for (file, subdir) in targets {
+        let response = app::fetch(moodle.as_ref(), graph.as_ref(), file).await?;
+        download::download(response, file, &dir.join(subdir), force, overwrite, false).await?;
     }
-    for (file, subdir) in files_under(&index, node) {
-        download::download(&client, file, &dir.join(subdir), force, overwrite, false).await?;
+    if let Some(graph) = &graph {
+        app::persist_graph_token(graph)?;
     }
     Ok(())
 }

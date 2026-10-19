@@ -5,7 +5,7 @@ use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
-use study_core::index::NodeKind;
+use study_core::index::{Node, NodeKind, SourceKind};
 
 use crate::app;
 use crate::fmt::{date, human_age, human_size};
@@ -27,7 +27,9 @@ Todo tab    Enter   its files in the Files tab
             A       show finished and old work too
 
 Calendar    h l / j k   day / week      H L   month    t   today
-            J K         event           Enter its course in Files";
+            J K         event           Enter its course in Files
+
+Teams       Enter on Messages (…) reads the channel, o opens it";
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let [tabs, body, footer] = Layout::vertical([
@@ -79,7 +81,7 @@ fn draw_sources(frame: &mut Frame, app: &App, area: Rect) {
         .courses
         .iter()
         .filter_map(|id| app.index.node(id))
-        .map(|course| ListItem::new(course_label(&app.config, course)))
+        .map(|course| ListItem::new(source_line(app, course)))
         .collect();
     let list = List::new(items)
         .block(pane_block("Sources", app.pane == Pane::Sources))
@@ -89,6 +91,16 @@ fn draw_sources(frame: &mut Frame, app: &App, area: Rect) {
         .with_selected(Some(app.course_sel))
         .with_offset(offset(app.course_sel, app.courses.len(), height));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// The course's label, tagged when it is a team; Moodle is the default
+/// and gets no tag.
+fn source_line(app: &App, course: &Node) -> Line<'static> {
+    let label = Span::raw(course_label(&app.config, course));
+    match course.source {
+        SourceKind::Moodle => Line::from(label),
+        SourceKind::Teams => Line::from(vec![label, Span::raw(" teams").dim()]),
+    }
 }
 
 fn draw_contents(frame: &mut Frame, app: &App, area: Rect) {
@@ -138,9 +150,10 @@ fn row_line(row: &Row, app: &App, width: usize) -> Line<'static> {
 
 fn node_suffix(kind: NodeKind, modname: Option<&str>) -> &'static str {
     match (kind, modname) {
-        (NodeKind::Section | NodeKind::Folder, _) => "/",
+        (NodeKind::Section | NodeKind::Folder | NodeKind::Channel, _) => "/",
         (_, Some("page")) => " [page]",
         (_, Some("url")) => " [url]",
+        (_, Some("messages")) => " [chat]",
         _ => " [module]",
     }
 }
@@ -161,10 +174,14 @@ fn course_detail(app: &App) -> Vec<String> {
     let Some(course) = app.course() else {
         return vec!["no courses — run `study sync`".to_string()];
     };
+    let summary = match course.source {
+        SourceKind::Moodle => format!("{} sections", app.index.children(&course.id).len()),
+        SourceKind::Teams => "Microsoft Teams".to_string(),
+    };
     vec![
         course_label(&app.config, course),
         course.name.clone(),
-        format!("{} sections", app.index.children(&course.id).len()),
+        summary,
         String::new(),
         "a alias   o open".to_string(),
     ]
@@ -182,23 +199,26 @@ fn row_detail(app: &App, row: &Row) -> Vec<String> {
             "Enter download".to_string(),
         ];
     }
-    let url = app
-        .index
-        .node(&row.id)
+    let node = app.index.node(&row.id);
+    let url = node
         .and_then(|node| node.web_url.clone())
         .unwrap_or_default();
+    let kind = match (&row.kind, row.modname()) {
+        (RowKind::Node(NodeKind::Channel, _), _) => "channel",
+        (_, modname) => modname.unwrap_or("section"),
+    };
     let hint = match row.modname() {
-        Some("page") => "Enter read   o open",
+        Some("page") | Some("messages") => "Enter read   o open",
         Some("url") => "o open",
         _ => "Enter expand   d download all",
     };
-    vec![
-        row.name.clone(),
-        row.modname().unwrap_or("section").to_string(),
-        url,
-        String::new(),
-        hint.to_string(),
-    ]
+    let mut lines = vec![row.name.clone(), kind.to_string()];
+    // Moodle is the default and goes unsaid, like the Sources tag.
+    if node.is_some_and(|node| node.source == SourceKind::Teams) {
+        lines.push("Microsoft Teams".to_string());
+    }
+    lines.extend([url, String::new(), hint.to_string()]);
+    lines
 }
 
 fn draw_calendar(frame: &mut Frame, app: &App, area: Rect) {
@@ -472,7 +492,7 @@ mod tests {
 
     use super::*;
     use crate::tui::reader::Reader;
-    use crate::tui::state::tests::{app, calendar_app, todo_app};
+    use crate::tui::state::tests::{app, calendar_app, teams_app, todo_app};
 
     fn render(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -500,6 +520,24 @@ mod tests {
         assert!(text.contains("Exercises/"));
         assert!(text.contains("Syllabus [page]"));
         assert!(text.contains("? help"));
+    }
+
+    #[test]
+    fn teams_sources_are_tagged_and_channels_look_like_folders() {
+        let mut app = teams_app();
+        let text = render(&app);
+        assert!(text.contains("Machine Learning teams"));
+        assert!(text.contains("Databases teams"));
+        assert!(text.contains("slides.pdf"));
+        assert!(text.contains("Messages (General) [chat]"));
+        assert!(text.contains("Microsoft Teams"));
+        app.select_course(1);
+        app.pane = Pane::Contents;
+        let text = render(&app);
+        assert!(text.contains("> Labs/"));
+        assert!(text.contains("channel"));
+        assert!(text.contains("Microsoft Teams"));
+        assert!(text.contains("Enter expand"));
     }
 
     #[test]

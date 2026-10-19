@@ -1,4 +1,4 @@
-//! `study` — fast Moodle (and later Teams) file access from the terminal.
+//! `study` — fast Moodle and Teams file access from the terminal.
 
 mod alias;
 mod app;
@@ -13,6 +13,7 @@ mod ls;
 mod path;
 mod put;
 mod sync;
+mod teams_sync;
 mod todo;
 mod tui;
 
@@ -114,6 +115,8 @@ enum LoginSource {
         /// Site root, e.g. https://moodle.example.edu (remembered afterwards)
         url: Option<String>,
     },
+    /// Device-code login with the Microsoft Teams client
+    Teams,
 }
 
 #[tokio::main]
@@ -125,6 +128,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Login {
             source: LoginSource::Moodle { url },
         } => login::moodle(url).await,
+        Command::Login {
+            source: LoginSource::Teams,
+        } => login::teams().await,
         Command::Sync => sync::run().await,
         Command::Ls { reference } => ls::run(reference).await,
         Command::Find { query } => find::run(&query.join(" ")).await,

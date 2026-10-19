@@ -260,8 +260,8 @@ fn expand(app: &mut App) {
     }
 }
 
-/// Enter is polymorphic (SPEC §4.2): download a file, read a page, open a
-/// link, otherwise toggle the node.
+/// Enter is polymorphic (SPEC §4.2): download a file, read a page or a
+/// channel's messages, open a link, otherwise toggle the node.
 fn enter(app: &mut App) {
     if app.pane == Pane::Sources {
         app.pane = Pane::Contents;
@@ -272,6 +272,7 @@ fn enter(app: &mut App) {
     };
     match (&row.kind, row.modname()) {
         (RowKind::File(_), _) => download(app),
+        (RowKind::Node(..), Some("messages")) => tasks::spawn_messages(app, &row.id),
         (RowKind::Node(..), Some("page")) => tasks::spawn_page(app, &row.id),
         (RowKind::Node(..), Some("url")) => open(app),
         (RowKind::Node(..), _) if tree::has_children(&app.index, &row.id) => {
@@ -423,7 +424,7 @@ fn kind_name(kind: NodeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::state::tests::{app, calendar_app, todo_app};
+    use crate::tui::state::tests::{app, calendar_app, teams_app, todo_app};
 
     fn press(app: &mut App, code: KeyCode) {
         handle(app, KeyEvent::from(code));
@@ -593,6 +594,20 @@ mod tests {
         );
         let home = std::env::home_dir().unwrap();
         assert_eq!(resolve_path("~/hw.pdf", cwd), home.join("hw.pdf"));
+    }
+
+    #[test]
+    fn enter_on_messages_without_a_teams_login_says_so() {
+        let mut app = teams_app();
+        assert_eq!(app.course_id(), Some("teams:T1"));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.row().unwrap().id, "teams:msg:C1");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.error);
+        assert!(app.status.starts_with("not logged in to Teams"));
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(!app.busy);
     }
 
     #[test]

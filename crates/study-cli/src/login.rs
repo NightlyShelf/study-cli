@@ -1,4 +1,5 @@
-//! `study login moodle [URL]` — the mobile-app launch flow (SPEC §5.1).
+//! `study login moodle [URL]` — the mobile-app launch flow (SPEC §5.1) —
+//! and `study login teams` — the device-code flow (SPEC §5.2).
 
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -6,8 +7,9 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use study_core::secrets;
+use study_graph::{GraphClient, auth};
 use study_moodle::MoodleClient;
 use study_moodle::launch;
 
@@ -87,4 +89,45 @@ fn wait_for_redirect() -> Result<String> {
         }
     }
     bail!("no login received within 5 minutes — run `study login moodle` again")
+}
+
+/// Device-code login with the Microsoft Teams client (SPEC §5.2). The
+/// client id and authority are settled config values; nothing is probed.
+pub async fn teams() -> Result<()> {
+    let config = app::load_config()?;
+    let authority = &config.teams.authority;
+    let client_id = &config.teams.client_id;
+    let http = reqwest::Client::new();
+
+    let login = auth::start_device_login(&http, authority, client_id)
+        .await
+        .map_err(teams_error)?;
+    println!(
+        "Open {} and enter code {}",
+        login.verification_uri, login.user_code
+    );
+    // The url is printed above, so a browser that cannot be opened is no loss.
+    let _ = open::that_detached(&login.verification_uri);
+
+    let refresh_token = auth::finish_device_login(&http, authority, client_id, &login)
+        .await
+        .map_err(teams_error)?;
+    secrets::set("teams_refresh_token", &refresh_token).context("storing the Teams token")?;
+
+    let graph = GraphClient::new(authority, client_id, &refresh_token);
+    let teams = graph.joined_teams().await.map_err(teams_error)?;
+    println!("Logged in to Teams: {} team(s).", teams.len());
+    // Validating already refreshed, so the stored token may be stale by now.
+    app::persist_graph_token(&graph)
+}
+
+/// AADSTS codes are passed through verbatim so they can be looked up; the
+/// usual cause on a university tenant is a conditional-access policy.
+fn teams_error(err: study_graph::Error) -> anyhow::Error {
+    match err {
+        study_graph::Error::Auth { code, description } => anyhow!(
+            "{code}: {description}\nThis tenant may block the Teams client (conditional access); see SPEC §5.2."
+        ),
+        err => err.into(),
+    }
 }

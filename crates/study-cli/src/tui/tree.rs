@@ -39,6 +39,7 @@ impl Row {
 /// then its child nodes. A node is open iff `expanded` has its id. With a
 /// filter every node is walked regardless of `expanded` and only the rows
 /// whose name contains the filter survive, together with their ancestors.
+/// Files on the course itself (a single-channel team, SPEC §4.2) come first.
 pub fn build_rows(
     index: &Index,
     course_id: &str,
@@ -47,10 +48,25 @@ pub fn build_rows(
 ) -> Vec<Row> {
     let filter = filter.to_lowercase();
     let mut rows = Vec::new();
+    push_files(index, course_id, 0, &filter, &mut rows);
     for child in index.children(course_id) {
         push_node(index, child, 0, expanded, &filter, &mut rows);
     }
     rows
+}
+
+fn push_files(index: &Index, node_id: &str, depth: u8, filter: &str, rows: &mut Vec<Row>) {
+    for file in index.files_in(node_id) {
+        if !matches(&file.name, filter) {
+            continue;
+        }
+        rows.push(Row {
+            id: file.id.clone(),
+            depth,
+            kind: RowKind::File(file.size),
+            name: file.name.clone(),
+        });
+    }
 }
 
 fn push_node(
@@ -72,17 +88,7 @@ fn push_node(
     if !open {
         return;
     }
-    for file in index.files_in(&node.id) {
-        if !matches(&file.name, filter) {
-            continue;
-        }
-        rows.push(Row {
-            id: file.id.clone(),
-            depth: depth + 1,
-            kind: RowKind::File(file.size),
-            name: file.name.clone(),
-        });
-    }
+    push_files(index, &node.id, depth + 1, filter, rows);
     for child in index.children(&node.id) {
         push_node(index, child, depth + 1, expanded, filter, rows);
     }
@@ -205,6 +211,89 @@ pub mod tests {
         index
     }
 
+    /// A Teams node: ids follow the sync layout (`teams:<team>`,
+    /// `teams:chan:<channel>`, `teams:msg:<channel>`).
+    fn teams_node(
+        id: &str,
+        kind: NodeKind,
+        parent: Option<&str>,
+        name: &str,
+        remote_id: &str,
+    ) -> Node {
+        Node {
+            id: id.to_string(),
+            source: SourceKind::Teams,
+            parent: parent.map(str::to_string),
+            kind,
+            modname: (kind == NodeKind::Module).then(|| "messages".to_string()),
+            name: name.to_string(),
+            remote_id: remote_id.to_string(),
+            web_url: Some(format!("https://teams.microsoft.com/l/{id}")),
+        }
+    }
+
+    /// Two teams: Machine Learning has only General (slides.pdf + its
+    /// messages, straight under the team); Databases has Labs and Exams
+    /// channels, each with a file and its own messages entry.
+    pub fn teams() -> Index {
+        let mut index = Index::default();
+        index.replace_source(
+            Source {
+                kind: SourceKind::Teams,
+                name: "Microsoft Teams".to_string(),
+                remote_id: "teams".to_string(),
+                last_sync: Some(1),
+                delta_token: None,
+            },
+            vec![
+                teams_node("teams:T1", NodeKind::Team, None, "Machine Learning", "T1"),
+                teams_node(
+                    "teams:msg:C1",
+                    NodeKind::Module,
+                    Some("teams:T1"),
+                    "Messages (General)",
+                    "T1/C1",
+                ),
+                teams_node("teams:T2", NodeKind::Team, None, "Databases", "T2"),
+                teams_node(
+                    "teams:chan:C2",
+                    NodeKind::Channel,
+                    Some("teams:T2"),
+                    "Labs",
+                    "C2",
+                ),
+                teams_node(
+                    "teams:msg:C2",
+                    NodeKind::Module,
+                    Some("teams:chan:C2"),
+                    "Messages (Labs)",
+                    "T2/C2",
+                ),
+                teams_node(
+                    "teams:chan:C3",
+                    NodeKind::Channel,
+                    Some("teams:T2"),
+                    "Exams",
+                    "C3",
+                ),
+                teams_node(
+                    "teams:msg:C3",
+                    NodeKind::Module,
+                    Some("teams:chan:C3"),
+                    "Messages (Exams)",
+                    "T2/C3",
+                ),
+            ],
+            vec![
+                file("teams:file:I1", "teams:T1", "slides.pdf"),
+                file("teams:file:I2", "teams:chan:C2", "lab1.pdf"),
+                file("teams:file:I3", "teams:chan:C3", "mock.pdf"),
+            ],
+            vec![],
+        );
+        index
+    }
+
     fn names(rows: &[Row]) -> Vec<String> {
         rows.iter()
             .map(|row| format!("{}{}", " ".repeat(row.depth as usize), row.name))
@@ -263,6 +352,46 @@ pub mod tests {
         assert_eq!(names(&rows), ["Week 2"]);
 
         assert!(build_rows(&sample(), "moodle:1", &HashSet::new(), "zzz").is_empty());
+    }
+
+    #[test]
+    fn single_channel_team_shows_files_and_messages_at_the_top() {
+        let index = teams();
+        let rows = build_rows(&index, "teams:T1", &HashSet::new(), "");
+        assert_eq!(names(&rows), ["slides.pdf", "Messages (General)"]);
+        assert_eq!(rows[0].kind, RowKind::File(Some(2048)));
+        assert_eq!(rows[1].modname(), Some("messages"));
+        assert!(!has_children(&index, "teams:msg:C1"));
+        // The filter applies to the team's own files too.
+        let rows = build_rows(&index, "teams:T1", &HashSet::new(), "slides");
+        assert_eq!(names(&rows), ["slides.pdf"]);
+    }
+
+    #[test]
+    fn multi_channel_team_shows_channel_folders_with_messages() {
+        let index = teams();
+        let closed = build_rows(&index, "teams:T2", &HashSet::new(), "");
+        assert_eq!(names(&closed), ["Labs", "Exams"]);
+        assert_eq!(closed[0].kind, RowKind::Node(NodeKind::Channel, None));
+        assert!(has_children(&index, "teams:chan:C2"));
+
+        let expanded: HashSet<String> = ["teams:chan:C2", "teams:chan:C3"]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        let rows = build_rows(&index, "teams:T2", &expanded, "");
+        assert_eq!(
+            names(&rows),
+            [
+                "Labs",
+                " lab1.pdf",
+                " Messages (Labs)",
+                "Exams",
+                " mock.pdf",
+                " Messages (Exams)"
+            ]
+        );
+        assert_eq!(rows[2].modname(), Some("messages"));
     }
 
     #[test]

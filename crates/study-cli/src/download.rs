@@ -10,14 +10,14 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use study_core::index::File;
-use study_moodle::MoodleClient;
 
-/// Downloads `file` into `dir`, returning where it ended up. An unchanged
-/// local copy is skipped unless `force`; an existing file gets a
-/// `name (2).ext` sibling unless `overwrite`. `quiet` silences stdout and
-/// the progress bar, which would corrupt the TUI's alternate screen.
+/// Streams `response` (from `app::fetch`) into `dir` as `file`, returning
+/// where it ended up. An unchanged local copy is skipped unless `force`; an
+/// existing file gets a `name (2).ext` sibling unless `overwrite`. `quiet`
+/// silences stdout and the progress bar, which would corrupt the TUI's
+/// alternate screen.
 pub async fn download(
-    client: &MoodleClient,
+    response: reqwest::Response,
     file: &File,
     dir: &Path,
     force: bool,
@@ -37,11 +37,6 @@ pub async fn download(
         }
         dest = free_name(dir, &file.name);
     }
-
-    let response = client
-        .download(&file.download_url)
-        .await
-        .with_context(|| format!("downloading {}", file.name))?;
 
     let bar = if quiet {
         ProgressBar::hidden()

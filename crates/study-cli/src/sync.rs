@@ -1,4 +1,5 @@
-//! `study sync` — crawl Moodle into the index (SPEC §6).
+//! `study sync` — crawl Moodle (here) and Teams (`teams_sync`) into the
+//! index (SPEC §6).
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use study_moodle::api::{
 };
 use tokio::task::JoinSet;
 
-use crate::app;
+use crate::{app, teams_sync};
 
 /// Submission status is fetched per assignment; past this age the user no
 /// longer cares, and skipping it keeps sync fast on long-running sites.
@@ -32,11 +33,39 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-/// Full crawl: site info → courses → contents of each course. ~10 round-trips,
-/// so a sequential loop is fine. `quiet` silences the spinner and summary,
-/// which would corrupt the TUI's alternate screen.
+/// Refreshes every source the user is logged in to; one that is not is
+/// skipped with a note. `quiet` silences the spinners and summary, which
+/// would corrupt the TUI's alternate screen.
 pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
-    let client = app::moodle_client(config)?;
+    let moodle = app::moodle_client(config);
+    let graph = app::graph_client(config);
+    if let (Err(moodle_err), Err(graph_err)) = (&moodle, &graph) {
+        bail!("{moodle_err}\n{graph_err}");
+    }
+
+    let mut index = app::load_index()?;
+    let mut summary = Vec::new();
+    match moodle {
+        Ok(client) => summary.push(sync_moodle(&client, &mut index, quiet).await?),
+        Err(err) if !quiet => eprintln!("skipping Moodle: {err}"),
+        Err(_) => {}
+    }
+    match graph {
+        Ok(client) => summary.push(teams_sync::sync(&client, &mut index, quiet).await?),
+        Err(err) if !quiet => eprintln!("skipping Teams: {err}"),
+        Err(_) => {}
+    }
+    if !quiet {
+        eprintln!("synced {}", summary.join(", "));
+    }
+    app::save_index(&index)?;
+    Ok(index)
+}
+
+/// Full Moodle crawl into `index`: site info → courses → contents of each
+/// course. ~10 round-trips, so a sequential loop is fine. Returns the
+/// summary fragment for the sync line.
+async fn sync_moodle(client: &MoodleClient, index: &mut Index, quiet: bool) -> Result<String> {
     let site = match client.site_info().await {
         Ok(site) => site,
         Err(study_moodle::Error::TokenExpired(_)) => {
@@ -77,7 +106,7 @@ pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
     for assignment in &assignments {
         files.extend(map_handouts(assignment, &nodes));
     }
-    let statuses = submission_statuses(&client, &assignments, app::now(), quiet).await;
+    let statuses = submission_statuses(client, &assignments, app::now(), quiet).await;
     let mut events: Vec<Event> = assignments
         .iter()
         .map(|assignment| {
@@ -86,21 +115,18 @@ pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
         .collect();
 
     spinner.set_message("calendar");
-    let calendar = calendar_events(&client, &course_ids, app::now(), quiet).await;
+    let calendar = calendar_events(client, &course_ids, app::now(), quiet).await;
     let calendar_count = calendar.len();
     events.extend(calendar);
     spinner.finish_and_clear();
-    if !quiet {
-        eprintln!(
-            "synced {} courses, {} files, {} assignments, {} events",
-            courses.len(),
-            files.len(),
-            assignments.len(),
-            calendar_count
-        );
-    }
+    let summary = format!(
+        "{} courses, {} files, {} assignments, {} events",
+        courses.len(),
+        files.len(),
+        assignments.len(),
+        calendar_count
+    );
 
-    let mut index = app::load_index()?;
     let source = Source {
         kind: SourceKind::Moodle,
         name: site.sitename,
@@ -109,8 +135,7 @@ pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
         delta_token: None,
     };
     index.replace_source(source, nodes, files, events);
-    app::save_index(&index)?;
-    Ok(index)
+    Ok(summary)
 }
 
 /// Visible calendar events around now, as index rows. A site can have its

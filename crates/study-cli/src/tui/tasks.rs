@@ -1,9 +1,12 @@
 //! Background work. Every network call runs in a spawned task and reports
 //! back through one channel, so the UI loop never blocks.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use study_core::index::{File, Index};
+use study_graph::GraphClient;
+use study_moodle::MoodleClient;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::tui::reader::{self, Reader};
 use crate::tui::state::App;
@@ -74,21 +77,50 @@ fn mark_uploaded(app: &mut App, event_id: &str, file_name: &str) {
     }
 }
 
+/// Both clients go along; `app::fetch` picks one by the file's source and
+/// says which login is missing.
 pub fn spawn_download(app: &mut App, file: File) {
-    let Some(client) = client(app) else {
-        return;
-    };
+    let (moodle, graph) = (app.client.clone(), app.graph.clone());
     let dir = app.download_dir.clone();
     let tx = app.tx.clone();
     app.busy = true;
     app.set_status(format!("downloading {}…", file.name));
     tokio::spawn(async move {
-        let msg = match download::download(&client, &file, &dir, false, false, true).await {
+        let msg = match fetch_and_save(&moodle, &graph, &file, &dir).await {
             Ok(path) => Msg::Downloaded(path),
             Err(err) => Msg::Error(format!("{err:#}")),
         };
         let _ = tx.send(msg);
+        if is_teams(&file) {
+            persist_graph_token(graph.as_ref(), &tx);
+        }
     });
+}
+
+async fn fetch_and_save(
+    moodle: &Option<MoodleClient>,
+    graph: &Option<GraphClient>,
+    file: &File,
+    dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    let response = app::fetch(moodle.as_ref(), graph.as_ref(), file).await?;
+    download::download(response, file, dir, false, false, true).await
+}
+
+fn is_teams(file: &File) -> bool {
+    file.id.starts_with("teams:")
+}
+
+/// Entra rotates the refresh token on every refresh, so it is written back
+/// after each Graph use. The work itself succeeded, so a failure here is
+/// only reported: at worst the next start needs `study login teams`.
+fn persist_graph_token(graph: Option<&GraphClient>, tx: &UnboundedSender<Msg>) {
+    let Some(graph) = graph else {
+        return;
+    };
+    if let Err(err) = app::persist_graph_token(graph) {
+        let _ = tx.send(Msg::Error(format!("teams token not saved: {err:#}")));
+    }
 }
 
 /// Downloads everything under a node into `<download_dir>/<node name>/…`.
@@ -101,26 +133,39 @@ pub fn spawn_download_node(app: &mut App, node_id: &str) {
         app.set_error(format!("nothing to download under {}", node.name));
         return;
     }
-    let Some(client) = client(app) else {
-        return;
-    };
+    let (moodle, graph) = (app.client.clone(), app.graph.clone());
     let dir = app.download_dir.clone();
     let tx = app.tx.clone();
     app.busy = true;
     app.set_status(format!("downloading {} files…", files.len()));
     tokio::spawn(async move {
-        let total = files.len();
-        for (i, (file, subdir)) in files.iter().enumerate() {
-            let status = format!("downloading {}/{total}: {}", i + 1, file.name);
-            let _ = tx.send(Msg::Status(status));
-            let target = dir.join(subdir);
-            if let Err(err) = download::download(&client, file, &target, false, false, true).await {
-                let _ = tx.send(Msg::Error(format!("{err:#}")));
-                return;
-            }
+        let msg = match save_all(&moodle, &graph, &files, &dir, &tx).await {
+            Ok(()) => Msg::Downloaded(dir.join(&files[0].1)),
+            Err(err) => Msg::Error(format!("{err:#}")),
+        };
+        let _ = tx.send(msg);
+        if is_teams(&files[0].0) {
+            persist_graph_token(graph.as_ref(), &tx);
         }
-        let _ = tx.send(Msg::Downloaded(dir.join(&files[0].1)));
     });
+}
+
+/// Downloads `files` one by one into their subdirectories of `dir`,
+/// reporting progress on `tx`; the first failure stops the batch.
+async fn save_all(
+    moodle: &Option<MoodleClient>,
+    graph: &Option<GraphClient>,
+    files: &[(File, PathBuf)],
+    dir: &Path,
+    tx: &UnboundedSender<Msg>,
+) -> anyhow::Result<()> {
+    let total = files.len();
+    for (i, (file, subdir)) in files.iter().enumerate() {
+        let status = format!("downloading {}/{total}: {}", i + 1, file.name);
+        let _ = tx.send(Msg::Status(status));
+        fetch_and_save(moodle, graph, file, &dir.join(subdir)).await?;
+    }
+    Ok(())
 }
 
 /// Re-crawls Moodle and swaps the index in when done. The config is
@@ -142,16 +187,22 @@ pub fn spawn_sync(app: &mut App) {
     });
 }
 
+/// Reopens a reader fetched earlier this session. True when it did.
+fn open_cached(app: &mut App, node_id: &str) -> bool {
+    let Some(reader) = app.pages.get(node_id) else {
+        return false;
+    };
+    let msg = Msg::Page {
+        node_id: node_id.to_string(),
+        reader: reader.clone(),
+    };
+    apply(app, msg);
+    true
+}
+
 /// Opens the reader on a page module, fetching it unless already cached.
 pub fn spawn_page(app: &mut App, node_id: &str) {
-    if let Some(reader) = app.pages.get(node_id) {
-        apply(
-            app,
-            Msg::Page {
-                node_id: node_id.to_string(),
-                reader: reader.clone(),
-            },
-        );
+    if open_cached(app, node_id) {
         return;
     }
     let chain = path::ancestors(&app.index, node_id);
@@ -183,6 +234,50 @@ pub fn spawn_page(app: &mut App, node_id: &str) {
             Err(err) => Msg::Error(format!("{err:#}")),
         };
         let _ = tx.send(msg);
+    });
+}
+
+/// Opens the reader on a channel's transcript (SPEC §4.3), fetching it
+/// unless already cached. The entry's `remote_id` is `<team>/<channel>`;
+/// its parent, the team or channel, names the reader.
+pub fn spawn_messages(app: &mut App, node_id: &str) {
+    if open_cached(app, node_id) {
+        return;
+    }
+    let Some(node) = app.index.node(node_id) else {
+        return;
+    };
+    let Some((team_id, channel_id)) = node.remote_id.split_once('/') else {
+        app.set_error("not a Teams channel");
+        return;
+    };
+    let (team_id, channel_id) = (team_id.to_string(), channel_id.to_string());
+    let title = node
+        .parent
+        .as_deref()
+        .and_then(|parent| app.index.node(parent))
+        .map_or(node.name.clone(), |parent| parent.name.clone());
+    let web_url = node.web_url.clone();
+    let node_id = node_id.to_string();
+    let width = reader_width(app.width);
+    let Some(graph) = app.graph.clone() else {
+        app.set_error("not logged in to Teams — run `study login teams`");
+        return;
+    };
+    let tx = app.tx.clone();
+    app.busy = true;
+    app.set_status("loading…");
+    tokio::spawn(async move {
+        let msg = match reader::load_messages(&graph, &team_id, &channel_id, width).await {
+            Ok(mut reader) => {
+                reader.title = title;
+                reader.web_url = web_url;
+                Msg::Page { node_id, reader }
+            }
+            Err(err) => Msg::Error(format!("{err:#}")),
+        };
+        let _ = tx.send(msg);
+        persist_graph_token(Some(&graph), &tx);
     });
 }
 

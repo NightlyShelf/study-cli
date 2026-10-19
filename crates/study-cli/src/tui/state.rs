@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use study_core::config::Config;
 use study_core::index::{Index, Node, NodeKind};
+use study_graph::GraphClient;
 use study_moodle::MoodleClient;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -45,6 +46,8 @@ pub struct App {
     pub index: Index,
     /// `None` when not logged in: browsing still works, the network does not.
     pub client: Option<MoodleClient>,
+    /// Same for Teams: `None` until `study login teams`.
+    pub graph: Option<GraphClient>,
     /// Where downloads land: the directory `study` was started from.
     pub download_dir: PathBuf,
     pub tab: Tab,
@@ -95,6 +98,7 @@ impl App {
         config: Config,
         index: Index,
         client: Option<MoodleClient>,
+        graph: Option<GraphClient>,
         download_dir: PathBuf,
     ) -> App {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -103,6 +107,7 @@ impl App {
             config,
             index: Index::default(),
             client,
+            graph,
             download_dir,
             tab: Tab::Files,
             pane: Pane::Sources,
@@ -313,7 +318,14 @@ pub mod tests {
     pub fn app() -> App {
         let mut config = Config::default();
         config.set_alias("moodle:1", "algo");
-        App::new(config, sample(), None, PathBuf::from("/tmp"))
+        App::new(config, sample(), None, None, PathBuf::from("/tmp"))
+    }
+
+    /// `app()` showing the two Teams teams of `tree::tests::teams`.
+    pub fn teams_app() -> App {
+        let mut app = app();
+        app.replace_index(crate::tui::tree::tests::teams());
+        app
     }
 
     /// `app()` on the Todo tab with two assignments (see `todo::tests`).
@@ -400,7 +412,7 @@ pub mod tests {
     fn hidden_courses_are_skipped() {
         let mut config = Config::default();
         config.ui.hidden_courses.push("moodle:1".to_string());
-        let app = App::new(config, sample(), None, PathBuf::from("/tmp"));
+        let app = App::new(config, sample(), None, None, PathBuf::from("/tmp"));
         assert_eq!(app.courses, ["moodle:2"]);
     }
 }

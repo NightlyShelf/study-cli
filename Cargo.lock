@@ -3046,6 +3046,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "study-core",
+ "study-graph",
  "study-moodle",
  "tempfile",
  "tokio",

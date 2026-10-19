@@ -35,9 +35,15 @@ pub async fn run(query: &str) -> Result<()> {
         },
     };
 
-    let client = app::moodle_client(&config)?;
+    let moodle = app::moodle_client(&config).ok();
+    let graph = app::graph_client(&config).ok();
+    let file = hits[chosen].file;
+    let response = app::fetch(moodle.as_ref(), graph.as_ref(), file).await?;
     let dir = std::env::current_dir()?;
-    download::download(&client, hits[chosen].file, &dir, false, false, false).await?;
+    download::download(response, file, &dir, false, false, false).await?;
+    if let Some(graph) = &graph {
+        app::persist_graph_token(graph)?;
+    }
     Ok(())
 }
 
