@@ -1,5 +1,6 @@
 //! `study sync` — crawl Moodle into the index (SPEC §6).
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -107,6 +108,10 @@ pub fn map_course(base_url: &str, course: &Course, sections: &[Section]) -> (Vec
         };
         nodes.insert(nodes_before, section_node);
     }
+    // The same lecture PDF is listed under every page that embeds it (8–9
+    // times on the real site); the first copy is enough.
+    let mut seen = HashSet::new();
+    files.retain(|file| seen.insert((file.name.clone(), file.size, file.mtime)));
     (nodes, files)
 }
 
@@ -148,13 +153,31 @@ fn resource_file(module: &Module, node_id: &str) -> Option<File> {
     map_file(module.id, node_id, content)
 }
 
+/// A folder holds whatever was uploaded; any other module (page, assign,
+/// forum…) also lists the html/css/js/images its own page is built from.
 fn module_files(module: &Module, node_id: &str) -> Vec<File> {
     module
         .contents
         .iter()
         .filter(|content| content.kind == "file")
+        // A page's own rendering is an `index.html` with no mimetype; like a
+        // resource's main file it is the one content marked `sortorder: 1`.
+        .filter(|content| module.modname != "page" || content.sortorder != Some(1))
+        .filter(|content| module.modname == "folder" || is_attachment(content.mimetype.as_deref()))
         .filter_map(|content| map_file(module.id, node_id, content))
         .collect()
+}
+
+/// True for anything a student would download; false for the files a
+/// module's page is made of. An unknown mimetype is kept.
+fn is_attachment(mimetype: Option<&str>) -> bool {
+    let Some(mime) = mimetype else {
+        return true;
+    };
+    !(mime.starts_with("text/html")
+        || mime.starts_with("text/css")
+        || mime.starts_with("image/")
+        || mime.contains("javascript"))
 }
 
 fn map_file(cmid: u64, node_id: &str, content: &Content) -> Option<File> {
@@ -199,6 +222,13 @@ mod tests {
     fn ordered(filename: &str, sortorder: u64) -> Content {
         Content {
             sortorder: Some(sortorder),
+            ..content(filename, "/")
+        }
+    }
+
+    fn typed(filename: &str, mimetype: &str) -> Content {
+        Content {
+            mimetype: Some(mimetype.to_string()),
             ..content(filename, "/")
         }
     }
@@ -359,5 +389,51 @@ mod tests {
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["index.html", "slides.pdf"]);
+    }
+
+    #[test]
+    fn page_keeps_attachments_once() {
+        let (course, _) = fixture();
+        let page_files = || {
+            vec![
+                Content {
+                    sortorder: Some(1),
+                    mimetype: None,
+                    filesize: Some(0),
+                    ..content("index.html", "/")
+                },
+                typed("markdown.css", "text/css"),
+                typed("highlight.js", "application/javascript"),
+                typed("diagram.png", "image/png"),
+                typed("lecture5.pdf", "application/pdf"),
+            ]
+        };
+        let sections = vec![Section {
+            id: 30,
+            name: "Lectures".to_string(),
+            uservisible: Some(true),
+            modules: vec![
+                module(301, "Lecture 5", "page", page_files()),
+                module(302, "Lecture 5 (video)", "page", page_files()),
+            ],
+        }];
+        let (_, files) = map_course("https://moodle.test", &course, &sections);
+
+        let names: Vec<(&str, &str)> = files
+            .iter()
+            .map(|f| (f.name.as_str(), f.node.as_str()))
+            .collect();
+        assert_eq!(names, [("lecture5.pdf", "moodle:mod:301")]);
+    }
+
+    #[test]
+    fn attachments_by_mimetype() {
+        assert!(is_attachment(Some("application/pdf")));
+        assert!(is_attachment(Some("text/plain")));
+        assert!(is_attachment(None));
+        assert!(!is_attachment(Some("text/html; charset=utf-8")));
+        assert!(!is_attachment(Some("text/css")));
+        assert!(!is_attachment(Some("image/png")));
+        assert!(!is_attachment(Some("application/x-javascript")));
     }
 }
