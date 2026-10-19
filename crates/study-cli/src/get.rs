@@ -24,7 +24,7 @@ pub async fn run(
     let client = app::moodle_client(&config)?;
     let node = match path::resolve(&index, &config, reference)? {
         Target::File(file) => {
-            download::download(&client, file, &dir, force, overwrite).await?;
+            download::download(&client, file, &dir, force, overwrite, false).await?;
             return Ok(());
         }
         Target::Node(node) => node,
@@ -35,7 +35,7 @@ pub async fn run(
         );
     }
     for (file, subdir) in files_under(&index, node) {
-        download::download(&client, file, &dir.join(subdir), force, overwrite).await?;
+        download::download(&client, file, &dir.join(subdir), force, overwrite, false).await?;
     }
     Ok(())
 }

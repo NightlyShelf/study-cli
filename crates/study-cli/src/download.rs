@@ -14,13 +14,15 @@ use study_moodle::MoodleClient;
 
 /// Downloads `file` into `dir`, returning where it ended up. An unchanged
 /// local copy is skipped unless `force`; an existing file gets a
-/// `name (2).ext` sibling unless `overwrite`.
+/// `name (2).ext` sibling unless `overwrite`. `quiet` silences stdout and
+/// the progress bar, which would corrupt the TUI's alternate screen.
 pub async fn download(
     client: &MoodleClient,
     file: &File,
     dir: &Path,
     force: bool,
     overwrite: bool,
+    quiet: bool,
 ) -> Result<PathBuf> {
     let mut dest = dir.join(&file.name);
     if let Some(parent) = dest.parent() {
@@ -28,7 +30,9 @@ pub async fn download(
     }
     if dest.exists() && !overwrite {
         if !force && is_unchanged(&fs::metadata(&dest)?, file) {
-            println!("skip (unchanged): {}", file.name);
+            if !quiet {
+                println!("skip (unchanged): {}", file.name);
+            }
             return Ok(dest);
         }
         dest = free_name(dir, &file.name);
@@ -39,7 +43,11 @@ pub async fn download(
         .await
         .with_context(|| format!("downloading {}", file.name))?;
 
-    let bar = progress_bar(&file.name, response.content_length());
+    let bar = if quiet {
+        ProgressBar::hidden()
+    } else {
+        progress_bar(&file.name, response.content_length())
+    };
     let part = part_path(&dest);
     let written = write_stream(response, &part, &bar).await;
     bar.finish_and_clear();
@@ -55,7 +63,9 @@ pub async fn download(
         let handle = fs::OpenOptions::new().write(true).open(&dest)?;
         handle.set_modified(UNIX_EPOCH + Duration::from_secs(mtime))?;
     }
-    println!("{}", dest.display());
+    if !quiet {
+        println!("{}", dest.display());
+    }
     Ok(dest)
 }
 

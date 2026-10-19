@@ -11,6 +11,7 @@ mod login;
 mod ls;
 mod path;
 mod sync;
+mod tui;
 
 use std::path::PathBuf;
 
@@ -23,8 +24,9 @@ use clap::{Parser, Subcommand};
     about = "Download course files from Moodle fast"
 )]
 struct Cli {
+    /// Without a subcommand, opens the interactive browser
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -83,7 +85,10 @@ enum LoginSource {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+    let Some(command) = Cli::parse().command else {
+        return tui::run().await;
+    };
+    match command {
         Command::Login {
             source: LoginSource::Moodle { url },
         } => login::moodle(url).await,

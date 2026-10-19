@@ -37,7 +37,7 @@ pub async fn run(query: &str) -> Result<()> {
 
     let client = app::moodle_client(&config)?;
     let dir = std::env::current_dir()?;
-    download::download(&client, hits[chosen].file, &dir, false, false).await?;
+    download::download(&client, hits[chosen].file, &dir, false, false, false).await?;
     Ok(())
 }
 

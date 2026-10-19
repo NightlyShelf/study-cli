@@ -11,7 +11,7 @@ use study_moodle::MoodleClient;
 use crate::sync;
 
 /// Commands auto-sync when the index is older than this (SPEC §6).
-const STALE_AFTER_SECS: u64 = 15 * 60;
+pub const STALE_AFTER_SECS: u64 = 15 * 60;
 
 pub fn load_config() -> Result<Config> {
     config::load(&config::default_path()).context("reading config")
@@ -47,7 +47,7 @@ pub async fn fresh_index(config: &Config) -> Result<Index> {
         return Ok(index);
     }
     eprintln!("syncing…");
-    sync::sync(config).await
+    sync::sync(config, false).await
 }
 
 /// Unix seconds.

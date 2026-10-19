@@ -13,13 +13,14 @@ use crate::app;
 
 pub async fn run() -> Result<()> {
     let config = app::load_config()?;
-    sync(&config).await?;
+    sync(&config, false).await?;
     Ok(())
 }
 
 /// Full crawl: site info → courses → contents of each course. ~10 round-trips,
-/// so a sequential loop is fine.
-pub async fn sync(config: &Config) -> Result<Index> {
+/// so a sequential loop is fine. `quiet` silences the spinner and summary,
+/// which would corrupt the TUI's alternate screen.
+pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
     let client = app::moodle_client(config)?;
     let site = match client.site_info().await {
         Ok(site) => site,
@@ -33,7 +34,11 @@ pub async fn sync(config: &Config) -> Result<Index> {
         .await
         .context("listing courses")?;
 
-    let spinner = ProgressBar::new_spinner();
+    let spinner = if quiet {
+        ProgressBar::hidden()
+    } else {
+        ProgressBar::new_spinner()
+    };
     spinner.enable_steady_tick(Duration::from_millis(100));
     let mut nodes = Vec::new();
     let mut files = Vec::new();
@@ -48,7 +53,9 @@ pub async fn sync(config: &Config) -> Result<Index> {
         files.extend(course_files);
     }
     spinner.finish_and_clear();
-    eprintln!("synced {} courses, {} files", courses.len(), files.len());
+    if !quiet {
+        eprintln!("synced {} courses, {} files", courses.len(), files.len());
+    }
 
     let mut index = app::load_index()?;
     let source = Source {
