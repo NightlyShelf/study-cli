@@ -476,7 +476,7 @@ Moodle web-service functions (all via `webservice/rest/server.php`):
 | quizzes (optional)   | `mod_quiz_get_quizzes_by_courses`                |
 | calendar events      | `core_calendar_get_calendar_events`              |
 | page content (reader)| `mod_page_get_pages_by_courses`                  |
-| file upload (draft)  | `core_files_upload`                              |
+| file upload (draft)  | `webservice/upload.php` (multipart, not a WS fn)  |
 | save submission      | `mod_assign_save_submission`                     |
 | submit for grading   | `mod_assign_submit_for_grading`                  |
 
