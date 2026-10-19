@@ -113,7 +113,7 @@ pub fn map_course(base_url: &str, course: &Course, sections: &[Section]) -> (Vec
 fn map_module(section_id: &str, module: &Module, nodes: &mut Vec<Node>, files: &mut Vec<File>) {
     // A resource is one file; showing it as its own node would only add a level.
     if module.modname == "resource" {
-        files.extend(module_files(module, section_id));
+        files.extend(resource_file(module, section_id));
         return;
     }
 
@@ -138,6 +138,14 @@ fn map_module(section_id: &str, module: &Module, nodes: &mut Vec<Node>, files: &
         web_url,
     });
     files.extend(module_files(module, &module_id));
+}
+
+/// A resource is one document, but an HTML one also lists its support files
+/// (`.js`, `.css`, images); Moodle marks the document with `sortorder: 1`.
+fn resource_file(module: &Module, node_id: &str) -> Option<File> {
+    let main = module.contents.iter().find(|c| c.sortorder == Some(1));
+    let content = main.or_else(|| module.contents.iter().find(|c| c.kind == "file"))?;
+    map_file(module.id, node_id, content)
 }
 
 fn module_files(module: &Module, node_id: &str) -> Vec<File> {
@@ -184,6 +192,14 @@ mod tests {
             )),
             mimetype: Some("application/pdf".to_string()),
             timemodified: Some(1_700_000_000),
+            sortorder: None,
+        }
+    }
+
+    fn ordered(filename: &str, sortorder: u64) -> Content {
+        Content {
+            sortorder: Some(sortorder),
+            ..content(filename, "/")
         }
     }
 
@@ -311,5 +327,37 @@ mod tests {
             "https://moodle.test/webservice/pluginfile.php/1/slides.pdf?forcedownload=1"
         );
         assert!(!files.iter().any(|f| f.name == "secret.pdf"));
+    }
+
+    #[test]
+    fn resource_keeps_only_its_main_file() {
+        let (course, _) = fixture();
+        let sections = vec![Section {
+            id: 20,
+            name: "Pages".to_string(),
+            uservisible: Some(true),
+            modules: vec![
+                module(
+                    201,
+                    "Lecture page",
+                    "resource",
+                    vec![
+                        ordered("tocbot.js", 0),
+                        ordered("index.html", 1),
+                        ordered("markdown.css", 0),
+                    ],
+                ),
+                module(
+                    202,
+                    "Old slides",
+                    "resource",
+                    vec![content("slides.pdf", "/"), content("extra.pdf", "/")],
+                ),
+            ],
+        }];
+        let (_, files) = map_course("https://moodle.test", &course, &sections);
+
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["index.html", "slides.pdf"]);
     }
 }

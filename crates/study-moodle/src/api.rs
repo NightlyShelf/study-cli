@@ -70,6 +70,10 @@ pub struct Content {
     pub mimetype: Option<String>,
     #[serde(default)]
     pub timemodified: Option<u64>,
+    /// 1 on a resource's main file; its support files (an HTML page's
+    /// `.js`/`.css`/images) have 0.
+    #[serde(default)]
+    pub sortorder: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,7 +126,8 @@ mod tests {
                         "filesize": 2048,
                         "fileurl": "https://moodle.test/webservice/pluginfile.php/5/mod_resource/content/1/slides.pdf?forcedownload=1",
                         "mimetype": "application/pdf",
-                        "timemodified": 1700000000
+                        "timemodified": 1700000000,
+                        "sortorder": 1
                     }]
                 },
                 {
@@ -155,6 +160,7 @@ mod tests {
         assert_eq!(file.filename, "slides.pdf");
         assert_eq!(file.filesize, Some(2048));
         assert_eq!(file.mimetype.as_deref(), Some("application/pdf"));
+        assert_eq!(file.sortorder, Some(1));
         assert!(file.fileurl.as_deref().unwrap().contains("pluginfile.php"));
 
         let link = &section.modules[1];
