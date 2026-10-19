@@ -435,7 +435,7 @@ and index paths). No wall of prose; examples over explanation.
 | # | Deliverable | Go/no-go |
 |---|-------------|----------|
 | 0 | Auth: (a) Moodle mobile service confirmed enabled on the real site ✓; (b) Teams device-code with Teams client + `.default` confirmed viable via reference impl ✓ | both resolved |
-| 1 | Workspace scaffold: four crates compile, `rustfmt.toml`, `[workspace.lints]`, `.pre-commit-config.yaml`, PR-to-main CI, short README (§9.2–9.3) | |
+| 1 | Workspace scaffold: four crates compile, `rustfmt.toml`, `[workspace.lints]`, `.pre-commit-config.yaml`, PR-to-main CI, short README (§9.2–9.3) | done 2026-10-19 (`27f2134`) |
 | 2 | `login moodle`, `sync`, `ls`, `find`, `get` for Moodle | |
 | 3 | TUI Files tab (Moodle), aliases, reader overlay for pages | |
 | 4 | `put` for Moodle assignments; Todo tab | |
