@@ -4,12 +4,15 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Clear, List, ListItem, ListState, Padding, Paragraph, Tabs, Wrap,
+};
 use study_core::index::{Node, NodeKind, SourceKind};
 
 use crate::app;
 use crate::fmt::{date, human_age, human_size};
 use crate::tui::calendar;
+use crate::tui::reader;
 use crate::tui::state::{App, Mode, Pane, Tab, course_label};
 use crate::tui::todo::TodoRow;
 use crate::tui::tree::{Row, RowKind};
@@ -416,28 +419,59 @@ fn browse_footer(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
+/// A narrow, padded box over the tree: the text wraps to `text_width`
+/// columns and `reader_height` lines, the same numbers the loader and the
+/// paging keys use.
 fn draw_reader(frame: &mut Frame, app: &App) {
     let Some(reader) = &app.reader else {
         return;
     };
-    let area = centered(frame.area(), 80, 80);
-    let visible: Vec<Line> = reader
-        .lines
-        .iter()
-        .skip(reader.scroll)
-        .map(|line| Line::from(line.as_str()))
-        .collect();
-    let title = format!(" {} ", reader.title);
-    let paragraph = Paragraph::new(visible).block(Block::bordered().title(title));
+    let frame_area = frame.area();
+    let width = reader::text_width(frame_area.width);
+    let height = reader::reader_height(frame_area.height);
+    let area = centered(frame_area, width as u16 + 6, height as u16 + 3);
+    let visible: Vec<Line> = reader.lines.iter().skip(reader.scroll).cloned().collect();
+    let mut block = overlay_block(&format!(" {} ", reader.title))
+        .title_bottom(Line::from(" j/k scroll · g/G ends · o open · q close ").dim());
+    if reader.lines.len() > height {
+        let position = scroll_position(reader.scroll, reader.lines.len() - height);
+        block = block.title_bottom(Line::from(format!(" {position} ")).right_aligned().dim());
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(visible).block(block), area);
+}
+
+/// `top`, `end`, or how far down the text the view is, for the bottom border.
+fn scroll_position(scroll: usize, max: usize) -> String {
+    if scroll == 0 {
+        return "top".to_string();
+    }
+    if scroll >= max {
+        return "end".to_string();
+    }
+    format!("{}%", scroll * 100 / max)
+}
+
+fn draw_help(frame: &mut Frame) {
+    let width = HELP
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let height = HELP.lines().count();
+    let area = centered(frame.area(), width as u16 + 6, height as u16 + 3);
+    let paragraph = Paragraph::new(HELP).block(overlay_block(" Keys "));
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
 }
 
-fn draw_help(frame: &mut Frame) {
-    let area = centered(frame.area(), 70, 60);
-    let paragraph = Paragraph::new(HELP).block(Block::bordered().title(" Keys "));
-    frame.render_widget(Clear, area);
-    frame.render_widget(paragraph, area);
+/// The frame both overlays share: rounded, with two columns of air beside
+/// the text and one line above it.
+fn overlay_block(title: &str) -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .padding(Padding::new(2, 2, 1, 0))
+        .title(title.to_string())
 }
 
 fn pane_block(title: &str, focused: bool) -> Block<'static> {
@@ -457,11 +491,12 @@ fn highlight(focused: bool) -> Style {
     }
 }
 
-fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-    let [area] = Layout::horizontal([Constraint::Percentage(percent_x)])
+/// A `width` × `height` box in the middle of `area`, shrunk to fit it.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let [area] = Layout::horizontal([Constraint::Length(width)])
         .flex(Flex::Center)
         .areas(area);
-    let [area] = Layout::vertical([Constraint::Percentage(percent_y)])
+    let [area] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .areas(area);
     area
@@ -544,16 +579,26 @@ mod tests {
     fn reader_overlay_shows_the_page() {
         let mut app = app();
         app.mode = Mode::Reader;
+        let mut lines = vec![Line::from("Welcome to the course").bold()];
+        lines.extend((1..40).map(|i| Line::from(format!("line {i}"))));
         app.reader = Some(Reader {
             title: "Syllabus".to_string(),
-            lines: vec!["Welcome to the course".to_string()],
+            lines,
             scroll: 0,
             web_url: None,
         });
         let text = render(&app);
+        assert!(text.contains("╭"));
         assert!(text.contains("Syllabus"));
         assert!(text.contains("Welcome to the course"));
-        assert!(text.contains("Esc close"));
+        assert!(text.contains("j/k scroll"));
+        assert!(text.contains(" top "));
+        // Two columns of padding keep the text off the border.
+        assert!(text.contains("│  Welcome"));
+        app.reader.as_mut().unwrap().scroll = 10;
+        let text = render(&app);
+        assert!(text.contains("%"));
+        assert!(!text.contains("Welcome to the course"));
     }
 
     #[test]

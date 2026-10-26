@@ -7,6 +7,7 @@ use study_core::index::NodeKind;
 
 use crate::app;
 use crate::tui::calendar;
+use crate::tui::reader;
 use crate::tui::state::{App, Mode, Pane, Tab};
 use crate::tui::tasks;
 use crate::tui::tree::{self, RowKind};
@@ -381,7 +382,7 @@ fn save_alias(app: &mut App) {
 
 fn reader(app: &mut App, code: KeyCode) {
     let pending_g = std::mem::take(&mut app.pending_g);
-    let height = reader_height(app);
+    let height = reader::reader_height(app.height);
     let Some(reader) = app.reader.as_mut() else {
         app.mode = Mode::Browse;
         return;
@@ -404,11 +405,6 @@ fn reader(app: &mut App, code: KeyCode) {
         }
         _ => {}
     }
-}
-
-/// Lines visible in the reader box; `draw.rs` sizes it the same way.
-fn reader_height(app: &App) -> usize {
-    usize::from(app.height) * 4 / 5
 }
 
 fn kind_name(kind: NodeKind) -> &'static str {

@@ -229,7 +229,7 @@ pub fn spawn_page(app: &mut App, node_id: &str) {
     };
     let web_url = node.web_url.clone();
     let node_id = node_id.to_string();
-    let width = reader_width(app.width);
+    let width = reader::text_width(app.width);
     let Some(client) = client(app) else {
         return;
     };
@@ -270,7 +270,7 @@ pub fn spawn_messages(app: &mut App, node_id: &str) {
         .map_or(node.name.clone(), |parent| parent.name.clone());
     let web_url = node.web_url.clone();
     let node_id = node_id.to_string();
-    let width = reader_width(app.width);
+    let width = reader::text_width(app.width);
     let Some(graph) = app.graph.clone() else {
         app.set_error("not logged in to Teams — run `study login teams`");
         return;
@@ -320,13 +320,6 @@ pub fn spawn_upload(app: &mut App, assignid: u64, path: PathBuf) {
         };
         let _ = tx.send(msg);
     });
-}
-
-/// Text width inside the reader box (`draw.rs` sizes it the same way).
-pub fn reader_width(terminal_width: u16) -> usize {
-    (usize::from(terminal_width) * 4 / 5)
-        .saturating_sub(4)
-        .max(20)
 }
 
 fn client(app: &mut App) -> Option<study_moodle::MoodleClient> {

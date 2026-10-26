@@ -1,7 +1,10 @@
 //! The reader overlay: a Moodle page or a Teams channel transcript
-//! rendered to plain text (SPEC §4.3).
+//! rendered to styled text (SPEC §4.3).
 
 use anyhow::{Context, Result, bail};
+use html2text::render::{RichAnnotation, TaggedLine};
+use ratatui::style::{Color, Style, Stylize};
+use ratatui::text::{Line, Span};
 use study_graph::GraphClient;
 use study_graph::api::Message;
 use study_moodle::MoodleClient;
@@ -9,7 +12,7 @@ use study_moodle::MoodleClient;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reader {
     pub title: String,
-    pub lines: Vec<String>,
+    pub lines: Vec<Line<'static>>,
     pub scroll: usize,
     pub web_url: Option<String>,
 }
@@ -24,6 +27,22 @@ impl Reader {
     pub fn scroll_to_end(&mut self, height: usize) {
         self.scroll = self.lines.len().saturating_sub(height);
     }
+}
+
+/// Columns of text in the reader box: at most 80 so lines stay readable
+/// on a wide terminal, and on a narrow one whatever is left after the
+/// border and padding.
+pub fn text_width(terminal_width: u16) -> usize {
+    usize::from(terminal_width).saturating_sub(8).clamp(20, 80)
+}
+
+/// Lines of text in the reader box: a box 90 % of the terminal high, minus
+/// its border and the padding line above the text. Both the drawing and the
+/// paging keys use this, so they agree on what one page is.
+pub fn reader_height(terminal_height: u16) -> usize {
+    (usize::from(terminal_height) * 9 / 10)
+        .saturating_sub(3)
+        .max(1)
 }
 
 /// Fetches the page of module `cmid` in course `course_remote_id` and
@@ -76,28 +95,34 @@ pub async fn load_messages(
 }
 
 /// Graph sends newest first; a transcript reads oldest first. Each message
-/// is a `— author · time —` header, its body, then its replies indented,
-/// and a blank line. Messages without text (member joined, …) are skipped.
-pub fn transcript(messages: &[Message], width: usize) -> Vec<String> {
+/// is a bold `— author · time —` header, its body, then its replies indented
+/// under a dim header, and a blank line. Messages without text (member
+/// joined, …) are skipped.
+pub fn transcript(messages: &[Message], width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for message in messages.iter().rev() {
         let body = body_lines(&message.body_html, width);
         if body.is_empty() {
             continue;
         }
-        lines.push(format!("— {} —", author_time(message)));
+        lines.push(Line::from(format!("— {} —", author_time(message))).bold());
         lines.extend(body);
         for reply in &message.replies {
             let body = body_lines(&reply.body_html, width.saturating_sub(4));
             if body.is_empty() {
                 continue;
             }
-            lines.push(format!("    ↳ {}", author_time(reply)));
-            lines.extend(body.into_iter().map(|line| format!("    {line}")));
+            lines.push(Line::from(format!("    ↳ {}", author_time(reply))).dim());
+            lines.extend(body.into_iter().map(indent));
         }
-        lines.push(String::new());
+        lines.push(Line::default());
     }
     lines
+}
+
+fn indent(mut line: Line<'static>) -> Line<'static> {
+    line.spans.insert(0, Span::raw("    "));
+    line
 }
 
 fn author_time(message: &Message) -> String {
@@ -119,37 +144,170 @@ fn short_time(rfc3339: &str) -> String {
 
 /// `html_to_lines` without the trailing blank lines html2text leaves, so an
 /// empty body renders to no lines at all.
-fn body_lines(html: &str, width: usize) -> Vec<String> {
+fn body_lines(html: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines = html_to_lines(html, width);
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+    while lines.last().is_some_and(is_blank) {
         lines.pop();
     }
     lines
 }
 
-/// Plain-text lines of `html`, wrapped to `width`; unrenderable HTML
-/// becomes a one-line note rather than an error.
-pub fn html_to_lines(html: &str, width: usize) -> Vec<String> {
-    let text = match html2text::from_read(html.as_bytes(), width.max(10)) {
-        Ok(text) => text,
-        Err(err) => format!("(cannot render page: {err})"),
+/// Styled lines of `html`, wrapped to `width`: bold, italic, links and code
+/// become terminal styles rather than markdown-like markup. Unrenderable
+/// HTML becomes a one-line note rather than an error.
+pub fn html_to_lines(html: &str, width: usize) -> Vec<Line<'static>> {
+    let rendered = html2text::config::rich()
+        .link_footnotes(false)
+        .lines_from_read(html.as_bytes(), width.max(10));
+    let tagged = match rendered {
+        Ok(tagged) => tagged,
+        Err(err) => return vec![Line::from(format!("(cannot render page: {err})"))],
     };
-    text.lines().map(str::to_string).collect()
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut after_heading = false;
+    for tagged in &tagged {
+        let text: String = tagged
+            .tagged_strings()
+            .map(|piece| piece.s.as_str())
+            .collect();
+        let heading = heading_level(&text);
+        let blank = text.trim().is_empty();
+        // Runs of blank lines are noise; one blank line under a heading is air.
+        if blank && lines.last().is_some_and(is_blank) {
+            continue;
+        }
+        if after_heading && !blank && heading.is_none() {
+            lines.push(Line::default());
+        }
+        lines.push(match heading {
+            Some(level) => heading_line(&text, level),
+            None => styled_line(tagged),
+        });
+        after_heading = heading.is_some();
+    }
+    lines
+}
+
+fn is_blank(line: &Line<'static>) -> bool {
+    line.spans.iter().all(|span| span.content.trim().is_empty())
+}
+
+/// The rich decorator still prefixes headings with `# `…`###### `; the
+/// level, or None when the line is not a heading.
+fn heading_level(text: &str) -> Option<usize> {
+    let level = text.bytes().take_while(|byte| *byte == b'#').count();
+    if (1..=6).contains(&level) && text.as_bytes().get(level) == Some(&b' ') {
+        Some(level)
+    } else {
+        None
+    }
+}
+
+/// The heading without its `#` prefix, bold, and yellow for the top levels.
+fn heading_line(text: &str, level: usize) -> Line<'static> {
+    let style = if level <= 2 {
+        Style::new().bold().fg(Color::Yellow)
+    } else {
+        Style::new().bold()
+    };
+    Line::styled(text[level + 1..].to_string(), style)
+}
+
+fn styled_line(tagged: &TaggedLine<Vec<RichAnnotation>>) -> Line<'static> {
+    let spans: Vec<Span<'static>> = tagged
+        .tagged_strings()
+        .map(|piece| Span::styled(piece.s.clone(), style(&piece.tag)))
+        .collect();
+    Line::from(spans)
+}
+
+fn style(tags: &[RichAnnotation]) -> Style {
+    let mut style = Style::new();
+    for tag in tags {
+        style = match tag {
+            RichAnnotation::Strong => style.bold(),
+            RichAnnotation::Emphasis => style.italic(),
+            RichAnnotation::Link(_) => style.underlined().fg(Color::Blue),
+            RichAnnotation::Code | RichAnnotation::Preformat(_) => style.fg(Color::Cyan),
+            RichAnnotation::Strikeout => style.crossed_out(),
+            RichAnnotation::Image(_) => style.dim(),
+            // Page authors' colours rarely suit a terminal theme.
+            _ => style,
+        };
+    }
+    style
 }
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Modifier;
+
     use super::*;
 
+    fn texts(lines: &[Line<'static>]) -> Vec<String> {
+        lines.iter().map(ToString::to_string).collect()
+    }
+
+    fn span<'a>(lines: &'a [Line<'static>], text: &str) -> &'a Span<'static> {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content == text)
+            .unwrap_or_else(|| panic!("no span {text:?} in {:?}", texts(lines)))
+    }
+
     #[test]
-    fn renders_headings_lists_and_links() {
-        let html = "<h1>Welcome</h1><ul><li>one</li><li>two</li></ul>\
-                    <p>See <a href=\"https://example.org\">the site</a>.</p>";
+    fn headings_links_and_bold_become_styles_not_markup() {
+        let html = "<h1>Welcome</h1><p>See <a href=\"https://x\">the site</a> \
+                    and <strong>bold</strong></p>";
         let lines = html_to_lines(html, 60);
-        assert!(!lines.is_empty());
-        assert!(lines.iter().any(|line| line.contains("Welcome")));
-        assert!(lines.iter().any(|line| line.contains("one")));
-        assert!(lines.iter().any(|line| line.contains("the site")));
+        let text = texts(&lines);
+        assert_eq!(text[0], "Welcome");
+        assert!(
+            text.iter()
+                .all(|line| !line.contains('#') && !line.contains("[1]"))
+        );
+        assert!(text.iter().all(|line| !line.contains("https://x")));
+        assert!(lines[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(lines[0].style.fg, Some(Color::Yellow));
+        assert!(is_blank(&lines[1]));
+        let link = span(&lines, "the site");
+        assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
+        let bold = span(&lines, "bold");
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn lists_keep_their_bullets() {
+        let lines = html_to_lines("<ul><li>one</li><li>two</li></ul>", 60);
+        assert_eq!(texts(&lines)[..2], ["* one", "* two"]);
+    }
+
+    #[test]
+    fn blank_lines_collapse_to_one() {
+        let html = "<p>a</p><br><br><br><p>b</p><h3>c</h3><p>d</p>";
+        let lines = html_to_lines(html, 60);
+        let text = texts(&lines);
+        let blanks = text
+            .windows(2)
+            .filter(|pair| pair[0].trim().is_empty() && pair[1].trim().is_empty());
+        assert_eq!(blanks.count(), 0, "{text:?}");
+        assert!(text.contains(&"a".to_string()));
+        assert!(text.contains(&"c".to_string()));
+        assert!(!text.iter().any(|line| line.starts_with('#')));
+    }
+
+    #[test]
+    fn text_width_caps_at_eighty_and_leaves_room_for_the_box() {
+        assert_eq!(text_width(200), 80);
+        assert_eq!(text_width(60), 52);
+        assert_eq!(text_width(10), 20);
+    }
+
+    #[test]
+    fn reader_height_leaves_room_for_border_and_padding() {
+        assert_eq!(reader_height(30), 24);
+        assert_eq!(reader_height(3), 1);
     }
 
     fn message(id: &str, author: &str, created: &str, body_html: &str) -> Message {
@@ -177,7 +335,7 @@ mod tests {
         // Newest first, as Graph sends them; the empty one must vanish.
         let lines = transcript(&[joined, exam, hello], 60);
         assert_eq!(
-            lines,
+            texts(&lines),
             [
                 "— Bob · 2026-10-17 09:30 —",
                 "hello all",
@@ -189,6 +347,8 @@ mod tests {
                 "",
             ]
         );
+        assert!(lines[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(lines[5].style.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]
@@ -202,7 +362,7 @@ mod tests {
     fn scrolling_stays_inside_the_text() {
         let mut reader = Reader {
             title: "t".to_string(),
-            lines: (0..10).map(|i| i.to_string()).collect(),
+            lines: (0..10).map(|i| Line::from(i.to_string())).collect(),
             scroll: 0,
             web_url: None,
         };
