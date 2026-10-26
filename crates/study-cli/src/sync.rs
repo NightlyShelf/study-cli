@@ -330,40 +330,87 @@ pub fn map_course(base_url: &str, course: &Course, sections: &[Section]) -> (Vec
     }];
     let mut files = Vec::new();
 
+    // Moodle 4.5 lists a subsection twice: as a `subsection` module in its
+    // parent and as a top-level "delegated" section that holds its modules.
+    // Only the nested place is right, so delegated sections are kept aside
+    // here and emitted where their module sits.
+    let subsections: HashMap<u64, &Section> = sections
+        .iter()
+        .filter(|section| section.component.as_deref() == Some("mod_subsection"))
+        .filter_map(|section| Some((section.itemid?, section)))
+        .collect();
+
     for section in sections {
-        if section.uservisible == Some(false) {
+        if section.component.as_deref() == Some("mod_subsection") {
             continue;
         }
-        let section_id = format!("moodle:sec:{}", section.id);
-        let nodes_before = nodes.len();
-        let files_before = files.len();
-        for module in &section.modules {
-            if module.uservisible == Some(false) {
-                continue;
-            }
-            map_module(&section_id, module, &mut nodes, &mut files);
-        }
-        // An empty section is just noise in `ls`.
-        if nodes.len() == nodes_before && files.len() == files_before {
-            continue;
-        }
-        let section_node = Node {
-            id: section_id,
-            source: SourceKind::Moodle,
-            parent: Some(course_id.clone()),
-            kind: NodeKind::Section,
-            modname: None,
-            name: section.name.clone(),
-            remote_id: section.id.to_string(),
-            web_url: None,
-        };
-        nodes.insert(nodes_before, section_node);
+        let name = &section.name;
+        map_section(
+            &course_id,
+            section,
+            name,
+            &subsections,
+            &mut nodes,
+            &mut files,
+        );
     }
     // The same lecture PDF is listed under every page that embeds it (8–9
     // times on the real site); the first copy is enough.
     let mut seen = HashSet::new();
     files.retain(|file| seen.insert((file.name.clone(), file.size, file.mtime)));
     (nodes, files)
+}
+
+/// Emits `section` and its modules under `parent`, nesting subsections.
+fn map_section(
+    parent: &str,
+    section: &Section,
+    name: &str,
+    subsections: &HashMap<u64, &Section>,
+    nodes: &mut Vec<Node>,
+    files: &mut Vec<File>,
+) {
+    if section.uservisible == Some(false) {
+        return;
+    }
+    let section_id = format!("moodle:sec:{}", section.id);
+    let nodes_before = nodes.len();
+    let files_before = files.len();
+    for module in &section.modules {
+        if module.uservisible == Some(false) {
+            continue;
+        }
+        if module.modname != "subsection" {
+            map_module(&section_id, module, nodes, files);
+            continue;
+        }
+        // The module itself is an empty shell; its content lives in the
+        // delegated section. Without one there is nothing to show.
+        let Some(inner) = module.instance.and_then(|id| subsections.get(&id)) else {
+            continue;
+        };
+        let name = if module.name.is_empty() {
+            &inner.name
+        } else {
+            &module.name
+        };
+        map_section(&section_id, inner, name, subsections, nodes, files);
+    }
+    // An empty section is just noise in `ls`.
+    if nodes.len() == nodes_before && files.len() == files_before {
+        return;
+    }
+    let section_node = Node {
+        id: section_id,
+        source: SourceKind::Moodle,
+        parent: Some(parent.to_string()),
+        kind: NodeKind::Section,
+        modname: None,
+        name: name.to_string(),
+        remote_id: section.id.to_string(),
+        web_url: None,
+    };
+    nodes.insert(nodes_before, section_node);
 }
 
 fn map_module(section_id: &str, module: &Module, nodes: &mut Vec<Node>, files: &mut Vec<File>) {
@@ -489,12 +536,33 @@ mod tests {
             id,
             name: name.to_string(),
             modname: modname.to_string(),
+            instance: None,
             url: Some(format!(
                 "https://moodle.test/mod/{modname}/view.php?id={id}"
             )),
             uservisible: Some(true),
             contents,
             contentsinfo: None,
+        }
+    }
+
+    fn section(id: u64, name: &str, modules: Vec<Module>) -> Section {
+        Section {
+            id,
+            name: name.to_string(),
+            uservisible: Some(true),
+            component: None,
+            itemid: None,
+            modules,
+        }
+    }
+
+    /// The top-level twin Moodle 4.5 emits for a `subsection` module.
+    fn delegated(id: u64, name: &str, instance: u64, modules: Vec<Module>) -> Section {
+        Section {
+            component: Some("mod_subsection".to_string()),
+            itemid: Some(instance),
+            ..section(id, name, modules)
         }
     }
 
@@ -511,11 +579,10 @@ mod tests {
         };
         link.fileurl = Some("https://example.org".to_string());
         let sections = vec![
-            Section {
-                id: 10,
-                name: "Week 1".to_string(),
-                uservisible: Some(true),
-                modules: vec![
+            section(
+                10,
+                "Week 1",
+                vec![
                     module(101, "Slides", "resource", vec![content("slides.pdf", "/")]),
                     module(
                         102,
@@ -526,24 +593,21 @@ mod tests {
                     module(103, "Syllabus", "page", vec![]),
                     module(104, "Course site", "url", vec![link]),
                 ],
-            },
+            ),
             Section {
-                id: 11,
-                name: "Hidden".to_string(),
                 uservisible: Some(false),
-                modules: vec![module(
-                    105,
-                    "Secret",
-                    "resource",
-                    vec![content("secret.pdf", "/")],
-                )],
+                ..section(
+                    11,
+                    "Hidden",
+                    vec![module(
+                        105,
+                        "Secret",
+                        "resource",
+                        vec![content("secret.pdf", "/")],
+                    )],
+                )
             },
-            Section {
-                id: 12,
-                name: "Empty".to_string(),
-                uservisible: Some(true),
-                modules: vec![],
-            },
+            section(12, "Empty", vec![]),
         ];
         (course, sections)
     }
@@ -613,11 +677,10 @@ mod tests {
     #[test]
     fn resource_keeps_only_its_main_file() {
         let (course, _) = fixture();
-        let sections = vec![Section {
-            id: 20,
-            name: "Pages".to_string(),
-            uservisible: Some(true),
-            modules: vec![
+        let sections = vec![section(
+            20,
+            "Pages",
+            vec![
                 module(
                     201,
                     "Lecture page",
@@ -635,7 +698,7 @@ mod tests {
                     vec![content("slides.pdf", "/"), content("extra.pdf", "/")],
                 ),
             ],
-        }];
+        )];
         let (_, files) = map_course("https://moodle.test", &course, &sections);
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
@@ -659,15 +722,14 @@ mod tests {
                 typed("lecture5.pdf", "application/pdf"),
             ]
         };
-        let sections = vec![Section {
-            id: 30,
-            name: "Lectures".to_string(),
-            uservisible: Some(true),
-            modules: vec![
+        let sections = vec![section(
+            30,
+            "Lectures",
+            vec![
                 module(301, "Lecture 5", "page", page_files()),
                 module(302, "Lecture 5 (video)", "page", page_files()),
             ],
-        }];
+        )];
         let (_, files) = map_course("https://moodle.test", &course, &sections);
 
         let names: Vec<(&str, &str)> = files
@@ -675,6 +737,82 @@ mod tests {
             .map(|f| (f.name.as_str(), f.node.as_str()))
             .collect();
         assert_eq!(names, [("lecture5.pdf", "moodle:mod:301")]);
+    }
+
+    #[test]
+    fn subsection_nests_its_delegated_section() {
+        let (course, _) = fixture();
+        let subsection = Module {
+            instance: Some(5),
+            ..module(401, "Lecture 1", "subsection", vec![])
+        };
+        let sections = vec![
+            section(40, "Lectures", vec![subsection]),
+            delegated(
+                41,
+                "Lecture 1",
+                5,
+                vec![module(
+                    402,
+                    "Slides",
+                    "resource",
+                    vec![content("lecture1.pdf", "/")],
+                )],
+            ),
+        ];
+        let (nodes, files) = map_course("https://moodle.test", &course, &sections);
+
+        let tree: Vec<(&str, Option<&str>)> = nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.parent.as_deref()))
+            .collect();
+        assert_eq!(
+            tree,
+            [
+                ("moodle:7", None),
+                ("moodle:sec:40", Some("moodle:7")),
+                ("moodle:sec:41", Some("moodle:sec:40")),
+            ]
+        );
+        assert_eq!(nodes[2].kind, NodeKind::Section);
+        assert_eq!(nodes[2].name, "Lecture 1");
+        assert_eq!(nodes[2].remote_id, "41");
+        assert_eq!(nodes[2].modname, None);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].node, "moodle:sec:41");
+    }
+
+    #[test]
+    fn subsection_without_its_module_is_dropped() {
+        let (course, _) = fixture();
+        let hidden = Module {
+            instance: Some(5),
+            uservisible: Some(false),
+            ..module(401, "Hidden", "subsection", vec![])
+        };
+        let orphan = Module {
+            instance: Some(6),
+            ..module(403, "Orphan", "subsection", vec![])
+        };
+        let sections = vec![
+            section(40, "Lectures", vec![hidden, orphan]),
+            delegated(
+                41,
+                "Hidden",
+                5,
+                vec![module(
+                    402,
+                    "Slides",
+                    "resource",
+                    vec![content("a.pdf", "/")],
+                )],
+            ),
+        ];
+        let (nodes, files) = map_course("https://moodle.test", &course, &sections);
+
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["moodle:7"]);
+        assert!(files.is_empty());
     }
 
     fn assignment(id: u64, cmid: u64, duedate: Option<u64>) -> Assignment {

@@ -36,6 +36,14 @@ pub struct Section {
     pub name: String,
     #[serde(default)]
     pub uservisible: Option<bool>,
+    /// `mod_subsection` on a Moodle 4.5 subsection: the API lists one both
+    /// as a `subsection` module in its parent and as this top-level
+    /// "delegated" section, which is the one holding the modules.
+    #[serde(default)]
+    pub component: Option<String>,
+    /// For a delegated section, the `instance` of its `subsection` module.
+    #[serde(default)]
+    pub itemid: Option<u64>,
     #[serde(default)]
     pub modules: Vec<Module>,
 }
@@ -45,6 +53,10 @@ pub struct Module {
     pub id: u64,
     pub name: String,
     pub modname: String,
+    /// The activity's own id (`cmid` is `id`); a subsection's matches the
+    /// `itemid` of its delegated [`Section`].
+    #[serde(default)]
+    pub instance: Option<u64>,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
