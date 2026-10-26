@@ -7,7 +7,7 @@ use study_core::index::{EventKind, Index};
 
 use crate::app;
 use crate::fmt::{date, weekday};
-use crate::todo::course_cell;
+use crate::todo::{course_cell, in_hidden_course};
 
 const DAY: u64 = 86_400;
 
@@ -63,6 +63,7 @@ pub fn cal_rows(index: &Index, config: &Config, from: u64, to: u64) -> Vec<(u64,
         .events
         .iter()
         .filter(|event| event.kind == EventKind::Calendar)
+        .filter(|event| !in_hidden_course(config, event))
         .filter_map(|event| event.start.map(|start| (start, event)))
         .filter(|(start, _)| (from..to).contains(start))
         .collect();
@@ -231,5 +232,15 @@ mod tests {
         assert_eq!(groups[2].1[0].course, "algo");
 
         assert!(cal_rows(&index, &config, TODAY + 2 * DAY, TODAY + 7 * DAY).is_empty());
+    }
+
+    #[test]
+    fn hidden_courses_keep_only_courseless_events() {
+        let (index, mut config) = sample();
+        config.ui.hidden_courses.push("moodle:7".to_string());
+        let groups = cal_rows(&index, &config, TODAY, TODAY + 7 * DAY);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, TODAY + DAY);
+        assert_eq!(groups[0].1[0].title, "Dentist");
     }
 }

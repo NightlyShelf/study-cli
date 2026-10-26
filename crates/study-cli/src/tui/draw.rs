@@ -24,6 +24,8 @@ Tab S-Tab   switch pane     a       alias for the course
 1 2 3       switch tab      /       filter (Enter keeps, Esc clears)
 g g / G     top / bottom    o       open in browser
 r           sync now        q Esc   quit / close
+x           hide / unhide the course or node
+.           show everything: fileless modules, hidden items
 
 Todo tab    Enter   its files in the Files tab
             u       upload a submission draft
@@ -96,14 +98,18 @@ fn draw_sources(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// The course's label, tagged when it is a team; Moodle is the default
-/// and gets no tag.
+/// The course's label, tagged when it is a team (Moodle is the default
+/// and gets no tag) and dimmed when hidden, which only the all view shows.
 fn source_line(app: &App, course: &Node) -> Line<'static> {
-    let label = Span::raw(course_label(&app.config, course));
-    match course.source {
-        SourceKind::Moodle => Line::from(label),
-        SourceKind::Teams => Line::from(vec![label, Span::raw(" teams").dim()]),
+    let mut spans = vec![Span::raw(course_label(&app.config, course))];
+    if course.source == SourceKind::Teams {
+        spans.push(Span::raw(" teams").dim());
     }
+    if !app.config.ui.hidden_courses.contains(&course.id) {
+        return Line::from(spans);
+    }
+    spans.push(Span::raw(" hidden"));
+    Line::from(spans).dim()
 }
 
 fn draw_contents(frame: &mut Frame, app: &App, area: Rect) {
@@ -127,37 +133,46 @@ fn draw_contents(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// `  > name/` with the size right-aligned for files.
+/// `  > name/` with the size right-aligned for files; the marker only on
+/// nodes that open to something. Hidden rows (all view) are dimmed.
 fn row_line(row: &Row, app: &App, width: usize) -> Line<'static> {
     let indent = "  ".repeat(usize::from(row.depth));
-    let (marker, suffix, size) = match &row.kind {
-        RowKind::File(size) => ("  ", "", human_size(*size)),
+    let (marker, mut suffix, size) = match &row.kind {
+        RowKind::File(size) => ("  ", String::new(), human_size(*size)),
         RowKind::Node(kind, modname) => {
-            let open = if app.expanded.contains(&row.id) {
-                "v "
-            } else {
-                "> "
+            let marker = match (row.expandable, app.expanded.contains(&row.id)) {
+                (false, _) => "  ",
+                (true, true) => "v ",
+                (true, false) => "> ",
             };
-            (open, node_suffix(*kind, modname.as_deref()), String::new())
+            (
+                marker,
+                node_suffix(*kind, modname.as_deref()),
+                String::new(),
+            )
         }
     };
+    if row.hidden {
+        suffix.push_str(" hidden");
+    }
     let text = format!("{indent}{marker}{}{suffix}", row.name);
     let name = fit(&text, width.saturating_sub(size.len() + 1));
     let gap = width.saturating_sub(name.chars().count() + size.len());
-    Line::from(vec![
+    let line = Line::from(vec![
         Span::raw(name),
         Span::raw(" ".repeat(gap)),
         Span::raw(size).dim(),
-    ])
+    ]);
+    if row.hidden { line.dim() } else { line }
 }
 
-fn node_suffix(kind: NodeKind, modname: Option<&str>) -> &'static str {
+/// `/` for containers, else the module type in brackets.
+fn node_suffix(kind: NodeKind, modname: Option<&str>) -> String {
     match (kind, modname) {
-        (NodeKind::Section | NodeKind::Folder | NodeKind::Channel, _) => "/",
-        (_, Some("page")) => " [page]",
-        (_, Some("url")) => " [url]",
-        (_, Some("messages")) => " [chat]",
-        _ => " [module]",
+        (NodeKind::Section | NodeKind::Folder | NodeKind::Channel, _) => "/".to_string(),
+        (_, Some("messages")) => " [chat]".to_string(),
+        (_, Some(modname)) => format!(" [{modname}]"),
+        (_, None) => " [module]".to_string(),
     }
 }
 
@@ -181,12 +196,18 @@ fn course_detail(app: &App) -> Vec<String> {
         SourceKind::Moodle => format!("{} sections", app.index.children(&course.id).len()),
         SourceKind::Teams => "Microsoft Teams".to_string(),
     };
+    let hide = if app.config.ui.hidden_courses.contains(&course.id) {
+        "x show"
+    } else {
+        "x hide"
+    };
     vec![
         course_label(&app.config, course),
         course.name.clone(),
         summary,
         String::new(),
         "a alias   o open".to_string(),
+        hide.to_string(),
     ]
 }
 
@@ -210,17 +231,19 @@ fn row_detail(app: &App, row: &Row) -> Vec<String> {
         (RowKind::Node(NodeKind::Channel, _), _) => "channel",
         (_, modname) => modname.unwrap_or("section"),
     };
-    let hint = match row.modname() {
-        Some("page") | Some("messages") => "Enter read   o open",
-        Some("url") => "o open",
-        _ => "Enter expand   d download all",
+    let hint = match (row.modname(), row.expandable) {
+        (Some("page") | Some("messages"), _) => "Enter read   o open",
+        (Some("url"), _) => "o open",
+        (_, true) => "Enter expand   d download all",
+        (_, false) => "o open",
     };
+    let hide = if row.hidden { "x show" } else { "x hide" };
     let mut lines = vec![row.name.clone(), kind.to_string()];
     // Moodle is the default and goes unsaid, like the Sources tag.
     if node.is_some_and(|node| node.source == SourceKind::Teams) {
         lines.push("Microsoft Teams".to_string());
     }
-    lines.extend([url, String::new(), hint.to_string()]);
+    lines.extend([url, String::new(), hint.to_string(), hide.to_string()]);
     lines
 }
 
@@ -406,6 +429,9 @@ fn browse_footer(app: &App) -> Line<'static> {
     if !app.filter.is_empty() {
         spans.push(Span::raw(format!("   /{}", app.filter)).dim());
     }
+    if app.show_all {
+        spans.push(Span::raw("   all").dim());
+    }
     if app.busy {
         spans.push(Span::raw("   …").dim());
     }
@@ -552,9 +578,36 @@ mod tests {
         assert!(text.contains("Algebra"));
         assert!(text.contains("Lecture1.pdf"));
         assert!(text.contains("2.0K"));
-        assert!(text.contains("Exercises/"));
-        assert!(text.contains("Syllabus [page]"));
+        assert!(text.contains("> Exercises/"));
+        assert!(text.contains("x hide"));
+        // The files view leaves the fileless page out; the all view shows
+        // it without an expand marker and says so in the footer.
+        assert!(!text.contains("Syllabus"));
+        assert!(!text.contains("   all"));
         assert!(text.contains("? help"));
+        app.toggle_show_all();
+        let text = render(&app);
+        assert!(text.contains("  Syllabus [page]"));
+        assert!(!text.contains("> Syllabus"));
+        assert!(text.contains("   all"));
+    }
+
+    #[test]
+    fn hidden_rows_and_courses_are_marked_in_the_all_view() {
+        let mut app = app();
+        app.config.ui.hidden_nodes.push("moodle:mod:5".to_string());
+        app.config.ui.hidden_courses.push("moodle:2".to_string());
+        app.rebuild();
+        app.pane = Pane::Contents;
+        let text = render(&app);
+        assert!(!text.contains("Exercises"));
+        assert!(!text.contains("Algebra"));
+        app.toggle_show_all();
+        app.row_sel = 2;
+        let text = render(&app);
+        assert!(text.contains("> Exercises/ hidden"));
+        assert!(text.contains("Algebra hidden"));
+        assert!(text.contains("x show"));
     }
 
     #[test]
@@ -564,8 +617,11 @@ mod tests {
         assert!(text.contains("Machine Learning teams"));
         assert!(text.contains("Databases teams"));
         assert!(text.contains("slides.pdf"));
-        assert!(text.contains("Messages (General) [chat]"));
+        assert!(!text.contains("Messages (General)"));
         assert!(text.contains("Microsoft Teams"));
+        app.toggle_show_all();
+        assert!(render(&app).contains("  Messages (General) [chat]"));
+        app.toggle_show_all();
         app.select_course(1);
         app.pane = Pane::Contents;
         let text = render(&app);

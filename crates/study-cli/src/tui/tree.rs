@@ -12,6 +12,11 @@ pub struct Row {
     pub depth: u8,
     pub kind: RowKind,
     pub name: String,
+    /// The row, or a node above it, is hidden in the config; only the all
+    /// view lists such rows, dimmed.
+    pub hidden: bool,
+    /// Opening the node would show at least one row in the current view.
+    pub expandable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,29 +40,85 @@ impl Row {
     }
 }
 
+/// What one build of the rows looks through; see `build_rows`.
+struct View<'a> {
+    expanded: &'a HashSet<String>,
+    /// Lower-cased, empty for none.
+    filter: String,
+    hidden: &'a [String],
+    show_all: bool,
+    /// Nodes with a file somewhere beneath them, hidden subtrees not
+    /// counted: the files view lists exactly these.
+    with_files: HashSet<String>,
+}
+
 /// The rows of one course, depth-first: a node, then (when open) its files,
 /// then its child nodes. A node is open iff `expanded` has its id. With a
 /// filter every node is walked regardless of `expanded` and only the rows
 /// whose name contains the filter survive, together with their ancestors.
 /// Files on the course itself (a single-channel team, SPEC §4.2) come first.
+///
+/// The files view (`show_all` false) lists a node only when a file lies
+/// beneath it and never lists the nodes in `hidden` or their subtrees; the
+/// all view lists every node and marks the hidden ones.
 pub fn build_rows(
     index: &Index,
     course_id: &str,
     expanded: &HashSet<String>,
     filter: &str,
+    hidden: &[String],
+    show_all: bool,
 ) -> Vec<Row> {
-    let filter = filter.to_lowercase();
+    let mut with_files = HashSet::new();
+    mark_with_files(index, course_id, hidden, &mut with_files);
+    let view = View {
+        expanded,
+        filter: filter.to_lowercase(),
+        hidden,
+        show_all,
+        with_files,
+    };
     let mut rows = Vec::new();
-    push_files(index, course_id, 0, &filter, &mut rows);
+    push_files(index, course_id, 0, false, &view, &mut rows);
     for child in index.children(course_id) {
-        push_node(index, child, 0, expanded, &filter, &mut rows);
+        push_node(index, child, 0, false, &view, &mut rows);
     }
     rows
 }
 
-fn push_files(index: &Index, node_id: &str, depth: u8, filter: &str, rows: &mut Vec<Row>) {
+/// Records every node under `node_id` with a file beneath it in `found`,
+/// skipping hidden subtrees, and says whether `node_id` itself is one.
+fn mark_with_files(
+    index: &Index,
+    node_id: &str,
+    hidden: &[String],
+    found: &mut HashSet<String>,
+) -> bool {
+    let mut any = !index.files_in(node_id).is_empty();
+    for child in index.children(node_id) {
+        if hidden.contains(&child.id) {
+            continue;
+        }
+        if mark_with_files(index, &child.id, hidden, found) {
+            any = true;
+        }
+    }
+    if any {
+        found.insert(node_id.to_string());
+    }
+    any
+}
+
+fn push_files(
+    index: &Index,
+    node_id: &str,
+    depth: u8,
+    hidden: bool,
+    view: &View,
+    rows: &mut Vec<Row>,
+) {
     for file in index.files_in(node_id) {
-        if !matches(&file.name, filter) {
+        if !matches(&file.name, &view.filter) {
             continue;
         }
         rows.push(Row {
@@ -65,6 +126,8 @@ fn push_files(index: &Index, node_id: &str, depth: u8, filter: &str, rows: &mut 
             depth,
             kind: RowKind::File(file.size),
             name: file.name.clone(),
+            hidden,
+            expandable: false,
         });
     }
 }
@@ -73,27 +136,39 @@ fn push_node(
     index: &Index,
     node: &Node,
     depth: u8,
-    expanded: &HashSet<String>,
-    filter: &str,
+    under_hidden: bool,
+    view: &View,
     rows: &mut Vec<Row>,
 ) {
+    let hidden = under_hidden || view.hidden.contains(&node.id);
+    let listed = view.show_all || (!hidden && view.with_files.contains(&node.id));
+    if !listed {
+        return;
+    }
+    let expandable = if view.show_all {
+        has_children(index, &node.id)
+    } else {
+        view.with_files.contains(&node.id)
+    };
     let start = rows.len();
     rows.push(Row {
         id: node.id.clone(),
         depth,
         kind: RowKind::Node(node.kind, node.modname.clone()),
         name: node.name.clone(),
+        hidden,
+        expandable,
     });
-    let open = !filter.is_empty() || expanded.contains(&node.id);
+    let open = !view.filter.is_empty() || view.expanded.contains(&node.id);
     if !open {
         return;
     }
-    push_files(index, &node.id, depth + 1, filter, rows);
+    push_files(index, &node.id, depth + 1, hidden, view, rows);
     for child in index.children(&node.id) {
-        push_node(index, child, depth + 1, expanded, filter, rows);
+        push_node(index, child, depth + 1, hidden, view, rows);
     }
     // A node that neither matches nor has a matching descendant is noise.
-    if !filter.is_empty() && rows.len() == start + 1 && !matches(&node.name, filter) {
+    if !view.filter.is_empty() && rows.len() == start + 1 && !matches(&node.name, &view.filter) {
         rows.pop();
     }
 }
@@ -102,7 +177,7 @@ fn matches(name: &str, filter: &str) -> bool {
     filter.is_empty() || name.to_lowercase().contains(filter)
 }
 
-/// True when opening the node would show anything.
+/// True when the node has any child node or file at all.
 pub fn has_children(index: &Index, node_id: &str) -> bool {
     !index.children(node_id).is_empty() || !index.files_in(node_id).is_empty()
 }
@@ -300,6 +375,16 @@ pub mod tests {
             .collect()
     }
 
+    /// The files view with nothing hidden.
+    fn files(index: &Index, course_id: &str, expanded: &HashSet<String>, filter: &str) -> Vec<Row> {
+        build_rows(index, course_id, expanded, filter, &[], false)
+    }
+
+    /// The all view with nothing hidden.
+    fn all(index: &Index, course_id: &str, expanded: &HashSet<String>, filter: &str) -> Vec<Row> {
+        build_rows(index, course_id, expanded, filter, &[], true)
+    }
+
     fn sections() -> HashSet<String> {
         ["moodle:sec:3", "moodle:sec:4"]
             .iter()
@@ -309,7 +394,7 @@ pub mod tests {
 
     #[test]
     fn open_sections_show_files_then_child_nodes() {
-        let rows = build_rows(&sample(), "moodle:1", &sections(), "");
+        let rows = all(&sample(), "moodle:1", &sections(), "");
         assert_eq!(
             names(&rows),
             [
@@ -323,63 +408,128 @@ pub mod tests {
         );
         assert_eq!(rows[1].kind, RowKind::File(Some(2048)));
         assert_eq!(rows[2].modname(), Some("folder"));
+        assert!(rows.iter().all(|row| !row.hidden));
+    }
+
+    #[test]
+    fn files_view_leaves_out_fileless_nodes() {
+        let rows = files(&sample(), "moodle:1", &sections(), "");
+        assert_eq!(
+            names(&rows),
+            [
+                "Week 1",
+                " Lecture1.pdf",
+                " Exercises",
+                "Week 2",
+                " Lecture2.pdf"
+            ]
+        );
+        // Whatever the files view lists can be opened.
+        assert!(rows.iter().all(|row| row.expandable == row.is_node()));
+        // The page is not even reachable through a filter.
+        assert!(files(&sample(), "moodle:1", &HashSet::new(), "syllabus").is_empty());
+    }
+
+    #[test]
+    fn expandable_follows_the_view() {
+        let rows = all(&sample(), "moodle:1", &sections(), "");
+        let syllabus = rows.iter().find(|row| row.name == "Syllabus").unwrap();
+        assert!(!syllabus.expandable);
+        let exercises = rows.iter().find(|row| row.name == "Exercises").unwrap();
+        assert!(exercises.expandable);
+        // A hidden folder takes its file with it: the files view no longer
+        // counts it for the section above.
+        let hidden = ["moodle:mod:5".to_string()];
+        let rows = build_rows(&sample(), "moodle:1", &HashSet::new(), "", &hidden, false);
+        assert_eq!(names(&rows), ["Week 1", "Week 2"]);
+        assert!(rows[0].expandable);
+        let rows = build_rows(&sample(), "moodle:1", &sections(), "", &hidden, false);
+        assert_eq!(
+            names(&rows),
+            ["Week 1", " Lecture1.pdf", "Week 2", " Lecture2.pdf"]
+        );
+    }
+
+    #[test]
+    fn hidden_nodes_only_show_in_the_all_view_marked() {
+        let hidden = ["moodle:sec:3".to_string()];
+        let rows = build_rows(&sample(), "moodle:1", &sections(), "", &hidden, false);
+        assert_eq!(names(&rows), ["Week 2", " Lecture2.pdf"]);
+
+        let rows = build_rows(&sample(), "moodle:1", &sections(), "", &hidden, true);
+        assert_eq!(rows.len(), 6);
+        // The hidden section and everything under it, nothing else.
+        let marked: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.hidden)
+            .map(|row| row.name.as_str())
+            .collect();
+        assert_eq!(marked, ["Week 1", "Lecture1.pdf", "Exercises", "Syllabus"]);
+        assert!(rows[0].expandable);
     }
 
     #[test]
     fn closed_nodes_hide_their_contents() {
-        let rows = build_rows(&sample(), "moodle:1", &HashSet::new(), "");
+        let rows = files(&sample(), "moodle:1", &HashSet::new(), "");
         assert_eq!(names(&rows), ["Week 1", "Week 2"]);
 
         let mut expanded = sections();
         expanded.insert("moodle:mod:5".to_string());
-        let rows = build_rows(&sample(), "moodle:1", &expanded, "");
+        let rows = files(&sample(), "moodle:1", &expanded, "");
         assert_eq!(names(&rows)[2..4], [" Exercises", "  ex1.pdf"]);
     }
 
     #[test]
     fn filter_keeps_matches_and_ancestors_and_ignores_expansion() {
-        let rows = build_rows(&sample(), "moodle:1", &HashSet::new(), "EX1");
+        let rows = files(&sample(), "moodle:1", &HashSet::new(), "EX1");
         assert_eq!(names(&rows), ["Week 1", " Exercises", "  ex1.pdf"]);
 
-        let rows = build_rows(&sample(), "moodle:1", &HashSet::new(), "lecture");
+        let rows = files(&sample(), "moodle:1", &HashSet::new(), "lecture");
         assert_eq!(
             names(&rows),
             ["Week 1", " Lecture1.pdf", "Week 2", " Lecture2.pdf"]
         );
 
         // A matching node is kept even when nothing below it matches.
-        let rows = build_rows(&sample(), "moodle:1", &HashSet::new(), "week 2");
+        let rows = files(&sample(), "moodle:1", &HashSet::new(), "week 2");
         assert_eq!(names(&rows), ["Week 2"]);
+        let rows = all(&sample(), "moodle:1", &HashSet::new(), "syllabus");
+        assert_eq!(names(&rows), ["Week 1", " Syllabus"]);
 
-        assert!(build_rows(&sample(), "moodle:1", &HashSet::new(), "zzz").is_empty());
+        assert!(files(&sample(), "moodle:1", &HashSet::new(), "zzz").is_empty());
     }
 
     #[test]
     fn single_channel_team_shows_files_and_messages_at_the_top() {
         let index = teams();
-        let rows = build_rows(&index, "teams:T1", &HashSet::new(), "");
+        let rows = all(&index, "teams:T1", &HashSet::new(), "");
         assert_eq!(names(&rows), ["slides.pdf", "Messages (General)"]);
         assert_eq!(rows[0].kind, RowKind::File(Some(2048)));
         assert_eq!(rows[1].modname(), Some("messages"));
+        assert!(!rows[1].expandable);
         assert!(!has_children(&index, "teams:msg:C1"));
+        // Messages hold no files, so the files view has just the file.
+        let rows = files(&index, "teams:T1", &HashSet::new(), "");
+        assert_eq!(names(&rows), ["slides.pdf"]);
         // The filter applies to the team's own files too.
-        let rows = build_rows(&index, "teams:T1", &HashSet::new(), "slides");
+        let rows = files(&index, "teams:T1", &HashSet::new(), "slides");
         assert_eq!(names(&rows), ["slides.pdf"]);
     }
 
     #[test]
     fn multi_channel_team_shows_channel_folders_with_messages() {
         let index = teams();
-        let closed = build_rows(&index, "teams:T2", &HashSet::new(), "");
+        let closed = files(&index, "teams:T2", &HashSet::new(), "");
         assert_eq!(names(&closed), ["Labs", "Exams"]);
         assert_eq!(closed[0].kind, RowKind::Node(NodeKind::Channel, None));
+        assert!(closed[0].expandable);
         assert!(has_children(&index, "teams:chan:C2"));
 
         let expanded: HashSet<String> = ["teams:chan:C2", "teams:chan:C3"]
             .iter()
             .map(|id| id.to_string())
             .collect();
-        let rows = build_rows(&index, "teams:T2", &expanded, "");
+        let rows = all(&index, "teams:T2", &expanded, "");
         assert_eq!(
             names(&rows),
             [
@@ -392,12 +542,14 @@ pub mod tests {
             ]
         );
         assert_eq!(rows[2].modname(), Some("messages"));
+        let rows = files(&index, "teams:T2", &expanded, "");
+        assert_eq!(names(&rows), ["Labs", " lab1.pdf", "Exams", " mock.pdf"]);
     }
 
     #[test]
     fn empty_course_has_no_rows() {
-        assert!(build_rows(&sample(), "moodle:2", &sections(), "").is_empty());
-        assert!(build_rows(&sample(), "missing", &sections(), "").is_empty());
+        assert!(all(&sample(), "moodle:2", &sections(), "").is_empty());
+        assert!(all(&sample(), "missing", &sections(), "").is_empty());
     }
 
     #[test]
@@ -437,9 +589,10 @@ pub mod tests {
             .map(|node| node.id.clone())
             .collect();
         for course in &courses {
-            build_rows(&index, &course.id, &expanded, "");
-            build_rows(&index, &course.id, &HashSet::new(), "a");
+            files(&index, &course.id, &expanded, "");
+            all(&index, &course.id, &expanded, "");
+            files(&index, &course.id, &HashSet::new(), "a");
         }
-        assert!(!build_rows(&index, &first.id, &expanded, "").is_empty());
+        assert!(!all(&index, &first.id, &expanded, "").is_empty());
     }
 }

@@ -5,6 +5,7 @@
 use study_core::config::Config;
 use study_core::index::{Event, EventKind, Index};
 
+use crate::todo;
 use crate::tui::state::course_label;
 
 /// One calendar day of the shown month.
@@ -43,7 +44,7 @@ pub fn month_days_with_events(index: &Index, config: &Config, year: i64, month: 
         })
         .collect();
     for event in &index.events {
-        if event.kind != EventKind::Calendar {
+        if event.kind != EventKind::Calendar || todo::in_hidden_course(config, event) {
             continue;
         }
         let Some(start) = event.start else {
@@ -274,5 +275,21 @@ pub mod tests {
         // Another month sees none of them.
         let november = month_days_with_events(&calendar(now), &config, 2026, 11);
         assert!(november.iter().all(|day| day.events.is_empty()));
+    }
+
+    #[test]
+    fn hidden_courses_keep_their_events_off_the_grid() {
+        let now = days_from_civil(2026, 10, 19) as u64 * 86_400 + 12 * 3600;
+        let mut config = Config::default();
+        config.ui.hidden_courses.push("moodle:2".to_string());
+        let days = month_days_with_events(&calendar(now), &config, 2026, 10);
+        let titles: Vec<&str> = days[18]
+            .events
+            .iter()
+            .map(|entry| entry.title.as_str())
+            .collect();
+        assert_eq!(titles, ["Exam"]);
+        // Events without a course are never hidden.
+        assert_eq!(days[19].events[0].title, "Dentist");
     }
 }

@@ -44,7 +44,10 @@ impl Default for Teams {
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Ui {
+    /// Course node ids the TUI hides, with their events, until `.` shows all.
     pub hidden_courses: Vec<String>,
+    /// Section, folder or module node ids the TUI hides (the `x` key).
+    pub hidden_nodes: Vec<String>,
 }
 
 impl Config {
@@ -90,6 +93,7 @@ mod tests {
         let mut config = Config::default();
         config.moodle.url = "https://moodle.example.edu".to_string();
         config.ui.hidden_courses.push("moodle:1".to_string());
+        config.ui.hidden_nodes.push("moodle:mod:6".to_string());
         config.set_alias("moodle:4821", "algo");
 
         save(&config, &path).unwrap();
@@ -99,6 +103,7 @@ mod tests {
         assert_eq!(loaded.teams.client_id, config.teams.client_id);
         assert_eq!(loaded.teams.authority, config.teams.authority);
         assert_eq!(loaded.ui.hidden_courses, config.ui.hidden_courses);
+        assert_eq!(loaded.ui.hidden_nodes, config.ui.hidden_nodes);
         assert_eq!(loaded.aliases, config.aliases);
     }
 
@@ -132,6 +137,7 @@ mod tests {
             "https://login.microsoftonline.com/organizations"
         );
         assert!(config.ui.hidden_courses.is_empty());
+        assert!(config.ui.hidden_nodes.is_empty());
     }
 
     #[test]

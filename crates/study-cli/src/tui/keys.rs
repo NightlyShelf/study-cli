@@ -3,14 +3,13 @@
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
-use study_core::index::NodeKind;
 
 use crate::app;
 use crate::tui::calendar;
 use crate::tui::reader;
-use crate::tui::state::{App, Mode, Pane, Tab};
+use crate::tui::state::{App, Mode, Pane, Tab, course_label};
 use crate::tui::tasks;
-use crate::tui::tree::{self, RowKind};
+use crate::tui::tree::RowKind;
 
 pub fn handle(app: &mut App, key: KeyEvent) {
     // Windows terminals also report key releases; only presses count.
@@ -56,6 +55,8 @@ fn browse(app: &mut App, code: KeyCode) {
         KeyCode::Enter => enter(app),
         KeyCode::Char('d') => download(app),
         KeyCode::Char('a') => start_alias(app),
+        KeyCode::Char('x') => toggle_hidden(app),
+        KeyCode::Char('.') => app.toggle_show_all(),
         KeyCode::Char('/') => {
             app.mode = Mode::Filter;
             app.pane = Pane::Contents;
@@ -115,7 +116,7 @@ fn calendar_enter(app: &mut App) {
         return;
     };
     let Some(course) = app.courses.iter().position(|id| *id == course_id) else {
-        app.set_error("the course is hidden in config.toml");
+        app.set_error("the course is hidden — press . to show everything");
         return;
     };
     app.select_course(course);
@@ -153,7 +154,7 @@ fn todo_enter(app: &mut App) {
         return;
     };
     let Some(course) = app.courses.iter().position(|id| *id == course_id) else {
-        app.set_error("the course is hidden in config.toml");
+        app.set_error("the course is hidden — press . to show everything");
         return;
     };
     let node_id = format!("moodle:mod:{cmid}");
@@ -169,6 +170,10 @@ fn todo_enter(app: &mut App) {
     app.select_course(course);
     app.tab = Tab::Files;
     app.pane = Pane::Contents;
+    // An assignment without handouts only exists in the all view.
+    if !app.show_all && !app.rows.iter().any(|row| row.id == node_id) {
+        app.toggle_show_all();
+    }
     match app.rows.iter().position(|row| row.id == node_id) {
         Some(i) => app.row_sel = i,
         None => app.set_error("assignment not in the files tree — press r to sync"),
@@ -255,7 +260,7 @@ fn expand(app: &mut App) {
     let Some(row) = app.row() else {
         return;
     };
-    if row.is_node() {
+    if row.expandable {
         let id = row.id.clone();
         app.set_open(&id, true);
     }
@@ -276,11 +281,48 @@ fn enter(app: &mut App) {
         (RowKind::Node(..), Some("messages")) => tasks::spawn_messages(app, &row.id),
         (RowKind::Node(..), Some("page")) => tasks::spawn_page(app, &row.id),
         (RowKind::Node(..), Some("url")) => open(app),
-        (RowKind::Node(..), _) if tree::has_children(&app.index, &row.id) => {
+        (RowKind::Node(..), _) if row.expandable => {
             let open = !app.expanded.contains(&row.id);
             app.set_open(&row.id, open);
         }
-        (RowKind::Node(kind, _), _) => app.set_status(format!("{} is empty", kind_name(*kind))),
+        (RowKind::Node(..), _) => {}
+    }
+}
+
+/// `x`: hides the focused course or node, or shows it again, persisted
+/// like aliases. Hidden things come back dimmed in the all view (`.`),
+/// where `x` on them is the way to unhide.
+fn toggle_hidden(app: &mut App) {
+    let target = match app.pane {
+        Pane::Sources => app
+            .course()
+            .map(|course| (course.id.clone(), course_label(&app.config, course))),
+        Pane::Contents => app
+            .row()
+            .filter(|row| row.is_node())
+            .map(|row| (row.id.clone(), row.name.clone())),
+    };
+    let Some((id, name)) = target else {
+        return;
+    };
+    let hidden = match app.pane {
+        Pane::Sources => &mut app.config.ui.hidden_courses,
+        Pane::Contents => &mut app.config.ui.hidden_nodes,
+    };
+    let status = match hidden.iter().position(|hidden| *hidden == id) {
+        Some(i) => {
+            hidden.remove(i);
+            format!("shown: {name}")
+        }
+        None => {
+            hidden.push(id);
+            format!("hidden: {name}")
+        }
+    };
+    app.rebuild();
+    match app.save_config() {
+        Ok(()) => app.set_status(status),
+        Err(err) => app.set_error(format!("{err:#}")),
     }
 }
 
@@ -374,7 +416,7 @@ fn save_alias(app: &mut App) {
     } else {
         app.config.set_alias(&course_id, &alias);
     }
-    match app::save_config(&app.config) {
+    match app.save_config() {
         Ok(()) => app.set_status(format!("alias: {alias}")),
         Err(err) => app.set_error(format!("{err:#}")),
     }
@@ -407,16 +449,6 @@ fn reader(app: &mut App, code: KeyCode) {
     }
 }
 
-fn kind_name(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Section => "section",
-        NodeKind::Folder => "folder",
-        NodeKind::Course | NodeKind::Team => "course",
-        NodeKind::Channel => "channel",
-        NodeKind::Module => "module",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,9 +466,9 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(app.row_sel, 1);
         press(&mut app, KeyCode::Char('G'));
-        assert_eq!(app.row_sel, 5);
+        assert_eq!(app.row_sel, 4);
         press(&mut app, KeyCode::Char('j'));
-        assert_eq!(app.row_sel, 5);
+        assert_eq!(app.row_sel, 4);
         press(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('g'));
         assert_eq!(app.row_sel, 0);
@@ -460,7 +492,7 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.mode, Mode::Browse);
         assert!(app.filter.is_empty());
-        assert_eq!(app.rows.len(), 6);
+        assert_eq!(app.rows.len(), 5);
     }
 
     #[test]
@@ -474,6 +506,94 @@ mod tests {
     }
 
     #[test]
+    fn dot_shows_everything_and_enter_ignores_empty_modules() {
+        let mut app = app();
+        app.pane = Pane::Contents;
+        assert!(app.rows.iter().all(|row| row.name != "Syllabus"));
+        press(&mut app, KeyCode::Char('.'));
+        assert!(app.show_all);
+        assert_eq!(app.rows.len(), 6);
+        assert_eq!(app.rows[3].name, "Syllabus");
+        press(&mut app, KeyCode::Char('.'));
+        assert_eq!(app.rows.len(), 5);
+
+        // A handout-less assignment is only listed in the all view, and
+        // neither l nor Enter pretend to open it.
+        let mut app = todo_app();
+        app.tab = Tab::Files;
+        app.select_course(1);
+        app.pane = Pane::Contents;
+        assert!(app.rows.is_empty());
+        press(&mut app, KeyCode::Char('.'));
+        assert_eq!(app.rows[1].name, "Homework 1");
+        assert!(!app.rows[1].expandable);
+        app.row_sel = 1;
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.rows.len(), 2);
+        assert!(!app.expanded.contains("moodle:mod:7"));
+        assert!(app.status.is_empty());
+    }
+
+    #[test]
+    fn x_on_a_node_hides_it_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app();
+        app.config_path = dir.path().join("config.toml");
+        app.pane = Pane::Contents;
+        app.row_sel = 2; // Exercises/
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.config.ui.hidden_nodes, ["moodle:mod:5"]);
+        assert_eq!(app.status, "hidden: Exercises");
+        assert!(app.rows.iter().all(|row| row.name != "Exercises"));
+        assert_eq!(app.row_sel, 2);
+        let saved = study_core::config::load(&app.config_path).unwrap();
+        assert_eq!(saved.ui.hidden_nodes, ["moodle:mod:5"]);
+        // Hidden rows come back dimmed in the all view, where x unhides.
+        press(&mut app, KeyCode::Char('.'));
+        let i = app
+            .rows
+            .iter()
+            .position(|row| row.name == "Exercises")
+            .unwrap();
+        assert!(app.rows[i].hidden);
+        app.row_sel = i;
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.config.ui.hidden_nodes.is_empty());
+        assert_eq!(app.status, "shown: Exercises");
+        assert!(!app.rows[i].hidden);
+        // Files cannot be hidden.
+        app.row_sel = 1;
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.config.ui.hidden_nodes.is_empty());
+    }
+
+    #[test]
+    fn x_on_a_course_hides_it_with_its_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = todo_app();
+        app.config_path = dir.path().join("config.toml");
+        app.tab = Tab::Files;
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.course_id(), Some("moodle:2"));
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.config.ui.hidden_courses, ["moodle:2"]);
+        assert_eq!(app.status, "hidden: Algebra");
+        assert_eq!(app.courses, ["moodle:1"]);
+        assert_eq!(app.course_id(), Some("moodle:1"));
+        assert_eq!(app.todo_rows.len(), 1);
+        assert!(app.cal_days.iter().all(|day| day.events.is_empty()));
+        let saved = study_core::config::load(&app.config_path).unwrap();
+        assert_eq!(saved.ui.hidden_courses, ["moodle:2"]);
+        press(&mut app, KeyCode::Char('.'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.course_id(), Some("moodle:2"));
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.config.ui.hidden_courses.is_empty());
+        assert_eq!(app.todo_rows.len(), 2);
+    }
+
+    #[test]
     fn h_and_l_collapse_and_expand() {
         let mut app = app();
         app.pane = Pane::Contents;
@@ -481,7 +601,7 @@ mod tests {
         press(&mut app, KeyCode::Char('l'));
         assert_eq!(app.rows[3].name, "ex1.pdf");
         press(&mut app, KeyCode::Char('h'));
-        assert_eq!(app.rows.len(), 6);
+        assert_eq!(app.rows.len(), 5);
         // A closed node jumps to its parent; the parent closes on the next h.
         press(&mut app, KeyCode::Char('h'));
         assert_eq!(app.row_sel, 0);
@@ -501,6 +621,8 @@ mod tests {
         assert_eq!(app.pane, Pane::Contents);
         assert_eq!(app.course_id(), Some("moodle:2"));
         assert_eq!(app.rows[app.row_sel].id, "moodle:mod:7");
+        // The assignment has no handouts, so only the all view lists it.
+        assert!(app.show_all);
     }
 
     #[test]
@@ -597,6 +719,9 @@ mod tests {
         let mut app = teams_app();
         assert_eq!(app.course_id(), Some("teams:T1"));
         press(&mut app, KeyCode::Tab);
+        // Messages hold no files: the all view is where they are read.
+        assert_eq!(app.rows.len(), 1);
+        press(&mut app, KeyCode::Char('.'));
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(app.row().unwrap().id, "teams:msg:C1");
         press(&mut app, KeyCode::Enter);

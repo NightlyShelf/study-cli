@@ -4,11 +4,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use study_core::config::Config;
+use study_core::config::{self, Config};
 use study_core::index::{Index, Node, NodeKind};
 use study_graph::GraphClient;
 use study_moodle::MoodleClient;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+use anyhow::Context;
 
 use crate::app;
 use crate::tui::calendar::{self, CalEntry, Day};
@@ -43,6 +45,8 @@ pub enum Mode {
 
 pub struct App {
     pub config: Config,
+    /// Where `a` and `x` persist the config; tests point it at a tempdir.
+    pub config_path: PathBuf,
     pub index: Index,
     /// `None` when not logged in: browsing still works, the network does not.
     pub client: Option<MoodleClient>,
@@ -56,6 +60,9 @@ pub struct App {
     /// Course node ids shown in the Sources pane.
     pub courses: Vec<String>,
     pub course_sel: usize,
+    /// The all view (`.`): every node and course, hidden ones dimmed. Off,
+    /// the files view lists only what has files beneath it (SPEC §1).
+    pub show_all: bool,
     /// Ids of the open nodes in the content tree.
     pub expanded: HashSet<String>,
     pub rows: Vec<Row>,
@@ -105,6 +112,7 @@ impl App {
         let (cal_year, cal_month, cal_day) = calendar::civil(app::now());
         let mut app = App {
             config,
+            config_path: config::default_path(),
             index: Index::default(),
             client,
             graph,
@@ -114,6 +122,7 @@ impl App {
             mode: Mode::Browse,
             courses: Vec::new(),
             course_sel: 0,
+            show_all: false,
             expanded: HashSet::new(),
             rows: Vec::new(),
             row_sel: 0,
@@ -148,23 +157,54 @@ impl App {
     /// from it. Sections start open; folders and modules start closed.
     pub fn replace_index(&mut self, index: Index) {
         self.index = index;
-        let hidden = &self.config.ui.hidden_courses;
-        self.courses = self
-            .index
-            .courses()
-            .iter()
-            .filter(|course| !hidden.contains(&course.id))
-            .map(|course| course.id.clone())
-            .collect();
         for node in &self.index.nodes {
             if node.kind == NodeKind::Section {
                 self.expanded.insert(node.id.clone());
             }
         }
-        self.course_sel = self.course_sel.min(self.courses.len().saturating_sub(1));
+        self.rebuild();
+    }
+
+    /// Everything derived from the index and the config, after either
+    /// changed.
+    pub fn rebuild(&mut self) {
+        self.rebuild_courses();
         self.rebuild_rows();
         self.rebuild_todo();
         self.rebuild_calendar();
+    }
+
+    /// The Sources list; hidden courses only appear in the all view. The
+    /// selected course stays selected when it is still listed.
+    pub fn rebuild_courses(&mut self) {
+        let selected = self.course_id().map(str::to_string);
+        let hidden = &self.config.ui.hidden_courses;
+        self.courses = self
+            .index
+            .courses()
+            .iter()
+            .filter(|course| self.show_all || !hidden.contains(&course.id))
+            .map(|course| course.id.clone())
+            .collect();
+        let kept = selected.and_then(|id| self.courses.iter().position(|course| *course == id));
+        self.course_sel = kept.unwrap_or(self.course_sel.min(self.courses.len().saturating_sub(1)));
+    }
+
+    /// `.`: switches between the files view and the all view, keeping the
+    /// focused row focused when both views list it.
+    pub fn toggle_show_all(&mut self) {
+        self.show_all = !self.show_all;
+        let selected = self.row().map(|row| row.id.clone());
+        self.rebuild_courses();
+        self.rebuild_rows();
+        if let Some(i) = selected.and_then(|id| self.rows.iter().position(|row| row.id == id)) {
+            self.row_sel = i;
+        }
+    }
+
+    /// Persists aliases and hidden items (`a`, `x`).
+    pub fn save_config(&self) -> anyhow::Result<()> {
+        config::save(&self.config, &self.config_path).context("saving config")
     }
 
     pub fn course_id(&self) -> Option<&str> {
@@ -232,9 +272,14 @@ impl App {
 
     pub fn rebuild_rows(&mut self) {
         self.rows = match self.course_id() {
-            Some(course_id) => {
-                tree::build_rows(&self.index, course_id, &self.expanded, &self.filter)
-            }
+            Some(course_id) => tree::build_rows(
+                &self.index,
+                course_id,
+                &self.expanded,
+                &self.filter,
+                &self.config.ui.hidden_nodes,
+                self.show_all,
+            ),
             None => Vec::new(),
         };
         self.row_sel = self.row_sel.min(self.rows.len().saturating_sub(1));
@@ -318,7 +363,10 @@ pub mod tests {
     pub fn app() -> App {
         let mut config = Config::default();
         config.set_alias("moodle:1", "algo");
-        App::new(config, sample(), None, None, PathBuf::from("/tmp"))
+        let mut app = App::new(config, sample(), None, None, PathBuf::from("/tmp"));
+        // A stray `a` or `x` in a test must never touch the real config.
+        app.config_path = std::env::temp_dir().join("study-tui-tests/config.toml");
+        app
     }
 
     /// `app()` showing the two Teams teams of `tree::tests::teams`.
@@ -349,8 +397,25 @@ pub mod tests {
     fn new_opens_sections_of_the_first_course() {
         let app = app();
         assert_eq!(app.courses, ["moodle:1", "moodle:2"]);
-        assert_eq!(app.rows.len(), 6);
+        // The Syllabus page has no files, so the files view leaves it out.
+        assert_eq!(app.rows.len(), 5);
+        assert!(!app.show_all);
         assert_eq!(course_label(&app.config, app.course().unwrap()), "algo");
+    }
+
+    #[test]
+    fn show_all_reveals_fileless_nodes_and_keeps_the_focus() {
+        let mut app = app();
+        app.row_sel = 4; // Lecture2.pdf
+        app.toggle_show_all();
+        assert!(app.show_all);
+        assert_eq!(app.rows.len(), 6);
+        assert_eq!(app.rows[app.row_sel].name, "Lecture2.pdf");
+        assert_eq!(app.rows[3].name, "Syllabus");
+        assert!(!app.rows[3].expandable);
+        app.toggle_show_all();
+        assert_eq!(app.rows.len(), 5);
+        assert_eq!(app.rows[app.row_sel].name, "Lecture2.pdf");
     }
 
     #[test]
@@ -358,7 +423,7 @@ pub mod tests {
         let mut app = app();
         app.pane = Pane::Contents;
         app.move_sel(100);
-        assert_eq!(app.row_sel, 5);
+        assert_eq!(app.row_sel, 4);
         app.move_sel(-100);
         assert_eq!(app.row_sel, 0);
 
@@ -409,10 +474,36 @@ pub mod tests {
     }
 
     #[test]
-    fn hidden_courses_are_skipped() {
+    fn hidden_courses_are_skipped_until_show_all() {
         let mut config = Config::default();
         config.ui.hidden_courses.push("moodle:1".to_string());
-        let app = App::new(config, sample(), None, None, PathBuf::from("/tmp"));
+        let mut app = App::new(config, sample(), None, None, PathBuf::from("/tmp"));
         assert_eq!(app.courses, ["moodle:2"]);
+        app.toggle_show_all();
+        assert_eq!(app.courses, ["moodle:1", "moodle:2"]);
+        // The selection follows the course, not its position.
+        assert_eq!(app.course_id(), Some("moodle:2"));
+        app.toggle_show_all();
+        assert_eq!(app.courses, ["moodle:2"]);
+        assert_eq!(app.course_sel, 0);
+    }
+
+    #[test]
+    fn hiding_a_course_drops_its_todo_and_calendar_rows() {
+        let mut app = todo_app();
+        assert_eq!(app.todo_rows.len(), 2);
+        app.config.ui.hidden_courses.push("moodle:2".to_string());
+        app.rebuild();
+        assert_eq!(app.courses, ["moodle:1"]);
+        assert_eq!(app.todo_rows.len(), 1);
+        assert_eq!(app.todo_rows[0].title, "Essay");
+        assert_eq!(app.todo_hidden, 0);
+
+        let mut app = calendar_app();
+        assert_eq!(app.cal_day().unwrap().events.len(), 2);
+        app.config.ui.hidden_courses.push("moodle:2".to_string());
+        app.rebuild();
+        assert_eq!(app.cal_day().unwrap().events.len(), 1);
+        assert_eq!(app.cal_entry().unwrap().title, "Exam");
     }
 }

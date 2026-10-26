@@ -26,6 +26,7 @@ pub fn todo_rows(index: &Index, config: &Config, now: u64, all: bool) -> Vec<Vec
         .events
         .iter()
         .filter(|event| event.kind == EventKind::Coursework)
+        .filter(|event| !in_hidden_course(config, event))
         .filter(|event| all || is_open(event, now))
         .collect();
     // `is_none` first so undated assignments sort after every real due date.
@@ -62,6 +63,15 @@ fn status_cell(event: &Event) -> String {
         Some("graded") => event.grade.clone().unwrap_or_else(|| "graded".to_string()),
         _ => String::new(),
     }
+}
+
+/// Hidden courses (`[ui] hidden_courses`, the TUI's `x`) take their events
+/// with them; an event without a course is never hidden.
+pub fn in_hidden_course(config: &Config, event: &Event) -> bool {
+    event
+        .course_id
+        .as_ref()
+        .is_some_and(|id| config.ui.hidden_courses.contains(id))
 }
 
 /// The course alias when set, else its name cut to `width` characters.
@@ -169,5 +179,18 @@ mod tests {
         assert_eq!(rows[1][1], "85.00 / 100.00");
         assert_eq!(rows[4][1], "submitted");
         assert!(rows.iter().all(|row| row[2] == "algo"));
+    }
+
+    #[test]
+    fn hidden_courses_are_left_out_even_with_all() {
+        let (mut index, mut config) = sample();
+        config.ui.hidden_courses.push("moodle:7".to_string());
+        assert!(todo_rows(&index, &config, NOW, true).is_empty());
+        let mut orphan = event("e8", "Orphan", Some(NOW + DAY), Some("new"));
+        orphan.course_id = None;
+        index.events.push(orphan);
+        let rows = todo_rows(&index, &config, NOW, false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][3], "Orphan");
     }
 }

@@ -32,6 +32,7 @@ pub fn todo_rows(index: &Index, config: &Config, now: u64) -> Vec<TodoRow> {
         .events
         .iter()
         .filter(|event| event.kind == EventKind::Coursework)
+        .filter(|event| !crate::todo::in_hidden_course(config, event))
         .map(|event| {
             let course = event
                 .course_id
@@ -172,5 +173,14 @@ pub mod tests {
         let graded = rows.iter().find(|row| row.title == "Old").unwrap();
         assert_eq!(graded.status, "graded 85/100");
         assert_eq!(rows[1].status, "");
+    }
+
+    #[test]
+    fn hidden_courses_have_no_rows() {
+        let mut config = Config::default();
+        config.ui.hidden_courses.push("moodle:2".to_string());
+        let rows = todo_rows(&coursework(NOW), &config, NOW);
+        let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
+        assert_eq!(titles, ["Essay"]);
     }
 }
