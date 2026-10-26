@@ -48,7 +48,7 @@ study put <file> --to <target> upload (section 7)
 study cal [--week|--month]     Moodle calendar
 study todo                     action events (due assignments, quizzes…)
 study open <course>/<path>     print the web URL (or open with xdg-open)
-study completions <shell>
+study completions <shell> [--install]  print the completion script, or install it
 ```
 
 Conventions:
@@ -83,6 +83,22 @@ Sources (left) lists Moodle courses and Teams teams together, each by its
 alias (§4.1). Middle lists the selected course's contents. Right shows
 metadata for the focused item, including the real (un-aliased) course name.
 
+**Files first.** The tool is about files, so the default *files view* lists
+only files and the sections, subsections, folders and modules that have a
+file somewhere beneath them. Pages without attachments, urls, quizzes,
+forums, channel `Messages` entries and the like are left out; `.` toggles
+the *all view*, which lists every node (pages and messages open in the
+reader from there). Nodes without anything beneath them in the current view
+draw no `>` marker and ignore Enter/`l` — there is no "module is empty"
+message.
+
+**Hiding.** `x` hides the focused course (Sources pane) or node (Contents
+pane) and persists it in `config.toml` under `[ui]` (`hidden_courses`,
+`hidden_nodes`, keyed by node id). Hidden things vanish from the files
+view; the all view shows them dimmed with a `hidden` tag, where `x`
+restores them. Hidden courses are also left out of the Calendar and Todo
+tabs and of `study cal` / `study todo` (§8).
+
 ### 4.1 Course aliases
 
 Course names are long; the TUI shows a short alias instead. Press `a` on a
@@ -99,6 +115,7 @@ name, truncated.
 | file                    | download to the launch directory                |
 | section / folder        | toggle expand (`d` downloads it recursively)    |
 | Moodle `page`           | open reader with its rendered HTML (§4.3)        |
+| any other node, no files beneath | nothing (no marker is drawn; `o` opens it) |
 | Teams `💬 Messages`      | open reader with the channel transcript (§4.3)   |
 | `url` link              | open in browser (not downloadable)               |
 
@@ -113,8 +130,11 @@ entry.
 
 ### 4.3 Reader overlay
 
-One shared scrollable overlay renders HTML as text (`html2text`), used for
-both Moodle pages/labels and Teams channel messages. Content is fetched **on
+One shared scrollable overlay renders HTML as styled text (`html2text` in
+rich mode: headings bold, emphasis/strong, links underlined, code
+highlighted, no footnote markers), wrapped to at most 80 columns in a
+padded, centred box, used for both Moodle pages/labels and Teams channel
+messages. Content is fetched **on
 demand** when the reader opens (brief spinner), not stored in the index —
 messages are volatile and pages are cheap — and cached for the session.
 
@@ -137,6 +157,8 @@ in the browser, `Esc`/`q` closes back to the tree. Numbered in-text links
 | Enter        | act on item (§4.2)                                  |
 | d            | download focused file / node recursively (§4.2)     |
 | a            | set/change alias for the focused course             |
+| x            | hide / unhide the focused course or node (persisted) |
+| .            | toggle the all view: every node, hidden ones dimmed |
 | /            | filter the current pane (substring, live)           |
 | Tab / S-Tab  | next / previous pane; `1` `2` `3` switch tabs       |
 | u            | upload: pick local file (path prompt) to focused target |
@@ -293,6 +315,12 @@ Sync:
     lecture PDFs attached to it (1290 of 1447 indexed files were this noise).
   - within a course, identical attachments (same name, size, mtime) listed
     under several pages are kept once (first occurrence).
+  - Moodle 4.5 subsections (`mod_subsection`) arrive twice: as a
+    `subsection` module inside the parent section and as a *delegated*
+    section (`component = "mod_subsection"`, `itemid` = the module's
+    `instance`) at the top level. The delegated section becomes a Section
+    node nested under the parent section (id `moodle:sec:<id>`, named after
+    the module); neither the module nor a top-level copy is emitted.
   Module mtime = max file `timemodified`, else
   `contentsinfo.lastmodified`. This mtime feeds both incremental sync and the
   skip-if-identical download check. Full sync of ~10 courses < 5 s.
@@ -356,6 +384,8 @@ Upload (`study put <file> --to <target>`):
   `introattachments` in the Files tab; `u` uploads a submission.
 - Both read from the index; `sync` refreshes events and coursework alongside
   files. Submission status cached ~10 min.
+- Events of courses in `[ui] hidden_courses` are left out of both, on the
+  CLI and in the TUI (§4).
 
 ## 9. Architecture
 
@@ -381,7 +411,8 @@ url = ""   # set by `study login moodle <url>`; e.g. https://moodle.your-uni.edu
 client_id = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"   # Microsoft Teams first-party
 authority = "https://login.microsoftonline.com/organizations"
 [ui]
-hidden_courses = []
+hidden_courses = []   # course node ids; the TUI `x` key manages both lists
+hidden_nodes = []     # section/module node ids hidden from the files view
 
 [aliases]
 # "<source>:<remote_id>" = "alias"   # managed by the TUI `a` key
@@ -464,7 +495,7 @@ and index paths). No wall of prose; examples over explanation.
 | 4 | `put` for Moodle assignments; Todo tab | done 2026-10-19; real sync 15 courses / 326 files / 70 assignments in 4.7 s |
 | 5 | Calendar tab, `cal` | done 2026-10-19 (times shown in UTC; no date crate) |
 | 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | implemented 2026-10-19; awaiting the first real `login teams` |
-| 7 | Shell completions, `whoami`, incremental sync, polish | completions + whoami done 2026-10-19; Teams `delta` sync pending |
+| 7 | Shell completions, `whoami`, incremental sync, polish | completions + whoami done 2026-10-19; files view, hiding, subsections, styled reader, `completions --install` 2026-10-22; Teams `delta` sync pending |
 
 ## 11. API reference (grounded in the reference impl)
 
