@@ -37,6 +37,13 @@ study todo                                         # due assignments and quizzes
 study                                              # TUI
 ```
 
+Shell completions:
+
+```sh
+study completions zsh --install                    # or: study completions zsh > ~/.local/share/zsh/site-functions/_study
+study completions bash --install                   # bash and fish too; see `study completions --help`
+```
+
 The TUI is vim-keyed (arrows work too); press `?` for the key help.
 
 ## Configuration

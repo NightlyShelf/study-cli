@@ -3,6 +3,7 @@
 mod alias;
 mod app;
 mod cal;
+mod completions;
 mod download;
 mod find;
 mod fmt;
@@ -20,7 +21,7 @@ mod whoami;
 
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -109,8 +110,14 @@ enum Command {
     },
     /// Show both accounts, token health and the state of the index
     Whoami,
-    /// Print a shell completion script (e.g. `study completions zsh`)
-    Completions { shell: clap_complete::Shell },
+    /// Print a shell completion script, or install it (`--install`; see `--help`)
+    #[command(after_long_help = completions::HELP)]
+    Completions {
+        shell: clap_complete::Shell,
+        /// Write the script where the shell loads it instead of printing it
+        #[arg(long)]
+        install: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,9 +163,6 @@ async fn main() -> anyhow::Result<()> {
             yes,
         } => put::run(&files, &to, submit, yes).await,
         Command::Whoami => whoami::run().await,
-        Command::Completions { shell } => {
-            clap_complete::generate(shell, &mut Cli::command(), "study", &mut std::io::stdout());
-            Ok(())
-        }
+        Command::Completions { shell, install } => completions::run(shell, install),
     }
 }
