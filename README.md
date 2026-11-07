@@ -40,7 +40,7 @@ study                                              # TUI
 Shell completions:
 
 ```sh
-study completions zsh --install                    # or: study completions zsh > ~/.local/share/zsh/site-functions/_study
+study completions zsh --install                    # writes _study and adds the fpath setup to ~/.zshrc, once
 study completions bash --install                   # bash and fish too; see `study completions --help`
 ```
 
