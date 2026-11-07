@@ -56,9 +56,9 @@ Conventions:
   `--json` everywhere.
 - Course references accept the Moodle short name, a case-insensitive prefix,
   or `teams:<team>/<channel>`. Ambiguity → list candidates and exit 2.
-- Existing file in cwd: skip if size and mtime match the remote file,
-  otherwise write `name (2).ext`. `--force` re-downloads, `--overwrite`
-  replaces.
+- Existing file in cwd: skip if it or one of its numbered copies
+  (`name (2).ext`, …) matches the remote size and mtime, otherwise write the
+  next free `name (n).ext`. `--force` re-downloads, `--overwrite` replaces.
 
 ## 4. TUI
 
@@ -369,8 +369,9 @@ Sync:
 Download:
 - Moodle: `fileurl` + `token=<token>` (append with `&` or `?` as needed;
   the URL is a `webservice/pluginfile.php` link). Streamed to `<cwd>/<name>`
-  via a `.part` file, then renamed. Collision: skip if size+mtime match,
-  else `name (2).ext` unless `--overwrite`.
+  via a `.part` file, then renamed. Collision: skip if `name` or any of its
+  numbered siblings `name (2).ext`, `name (3).ext`, … up to the first gap
+  matches size+mtime, else write the first free one unless `--overwrite`.
 - Teams: `GET /drives/{d}/items/{id}/content` (follows 302 to
   pre-authenticated URL). Folders are downloaded recursively into
   `<cwd>/<folder>/`.

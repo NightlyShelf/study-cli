@@ -11,20 +11,21 @@ use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use study_core::index::File;
 
-/// Where `file` would be written under `dir`, or `None` when the local copy
-/// is unchanged and should be skipped (SPEC §7). Decided before any request
-/// so a batch of already-present files costs no network. `force` downloads
-/// an unchanged file anyway; an existing file gets a `name (2).ext` sibling
-/// unless `overwrite`.
+/// Where `file` would be written under `dir`, or `None` when a local copy is
+/// unchanged and should be skipped (SPEC §7). Decided before any request so a
+/// batch of already-present files costs no network. Numbered siblings count
+/// as copies too, so an updated remote file or two same-named files in one
+/// folder are saved once rather than as a new `(n)` on every run. `force`
+/// downloads anyway; `overwrite` replaces `name` instead of numbering.
 pub fn plan(file: &File, dir: &Path, force: bool, overwrite: bool) -> Result<Option<PathBuf>> {
     let dest = dir.join(&file.name);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    if !dest.exists() || overwrite {
+    if overwrite {
         return Ok(Some(dest));
     }
-    if !force && is_unchanged(&fs::metadata(&dest)?, file) {
+    if !force && has_unchanged_copy(dir, file)? {
         return Ok(None);
     }
     Ok(Some(free_name(dir, &file.name)))
@@ -77,24 +78,46 @@ pub fn is_unchanged(meta: &Metadata, file: &File) -> bool {
     file.size == Some(meta.len()) && file.mtime.is_some() && file.mtime == local_mtime
 }
 
+/// Whether any of `name`, `stem (2).ext`, … up to the first gap is
+/// unchanged against `file`; the walk stops where [`free_name`] would write.
+fn has_unchanged_copy(dir: &Path, file: &File) -> Result<bool> {
+    let mut n = 1;
+    loop {
+        let path = numbered(dir, &file.name, n);
+        if !path.exists() {
+            return Ok(false);
+        }
+        if is_unchanged(&fs::metadata(&path)?, file) {
+            return Ok(true);
+        }
+        n += 1;
+    }
+}
+
 /// First of `name`, `stem (2).ext`, `stem (3).ext`, … that does not exist
 /// under `dir`. `name` may contain subdirectories.
 pub fn free_name(dir: &Path, name: &str) -> PathBuf {
+    let mut n = 1;
+    while numbered(dir, name, n).exists() {
+        n += 1;
+    }
+    numbered(dir, name, n)
+}
+
+/// The `n`th candidate for `name` under `dir`: `name` itself for 1, else
+/// `stem (n).ext` in the same folder.
+fn numbered(dir: &Path, name: &str, n: u32) -> PathBuf {
+    let path = dir.join(name);
+    if n == 1 {
+        return path;
+    }
     let name = Path::new(name);
-    let folder = dir.join(name.parent().unwrap_or(Path::new("")));
     let stem = name.file_stem().unwrap_or_default().to_string_lossy();
     let extension = name
         .extension()
         .map(|ext| format!(".{}", ext.to_string_lossy()))
         .unwrap_or_default();
-
-    let mut candidate = folder.join(name.file_name().unwrap_or_default());
-    let mut n = 2;
-    while candidate.exists() {
-        candidate = folder.join(format!("{stem} ({n}){extension}"));
-        n += 1;
-    }
-    candidate
+    path.with_file_name(format!("{stem} ({n}){extension}"))
 }
 
 fn part_path(dest: &Path) -> PathBuf {
@@ -226,6 +249,50 @@ mod tests {
             Some(dir.path().join("sub/b.pdf"))
         );
         assert!(dir.path().join("sub").is_dir());
+    }
+
+    fn write_with_mtime(path: &Path, contents: &[u8], mtime: u64) {
+        fs::write(path, contents).unwrap();
+        let handle = fs::OpenOptions::new().write(true).open(path).unwrap();
+        handle
+            .set_modified(UNIX_EPOCH + Duration::from_secs(mtime))
+            .unwrap();
+    }
+
+    #[test]
+    fn plan_skips_when_a_numbered_copy_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        write_with_mtime(&dir.path().join("foo.pdf"), b"old", 1_700_000_000);
+        write_with_mtime(&dir.path().join("foo (2).pdf"), b"newer", 1_700_000_100);
+
+        let updated = remote("foo.pdf", 5, 1_700_000_100);
+        assert_eq!(plan(&updated, dir.path(), false, false).unwrap(), None);
+    }
+
+    #[test]
+    fn plan_numbers_past_stale_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        write_with_mtime(&dir.path().join("foo.pdf"), b"old", 1_700_000_000);
+        write_with_mtime(&dir.path().join("foo (2).pdf"), b"older", 1_700_000_100);
+
+        let updated = remote("foo.pdf", 6, 1_700_000_200);
+        assert_eq!(
+            plan(&updated, dir.path(), false, false).unwrap(),
+            Some(dir.path().join("foo (3).pdf"))
+        );
+    }
+
+    #[test]
+    fn plan_force_ignores_unchanged_numbered_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        write_with_mtime(&dir.path().join("foo.pdf"), b"old", 1_700_000_000);
+        write_with_mtime(&dir.path().join("foo (2).pdf"), b"newer", 1_700_000_100);
+
+        let updated = remote("foo.pdf", 5, 1_700_000_100);
+        assert_eq!(
+            plan(&updated, dir.path(), true, false).unwrap(),
+            Some(dir.path().join("foo (3).pdf"))
+        );
     }
 
     #[test]
