@@ -1,5 +1,6 @@
 //! Typed wrappers over [`GraphClient::get`] for the endpoints used today
-//! (SPEC §11): teams, channels, channel files, delta, transfers, messages.
+//! (SPEC §11): teams, channels, channel files, team libraries, delta,
+//! transfers, messages.
 
 use std::path::Path;
 
@@ -28,6 +29,16 @@ pub struct Channel {
     pub id: String,
     #[serde(rename = "displayName", default)]
     pub display_name: String,
+    #[serde(rename = "webUrl", default)]
+    pub web_url: Option<String>,
+}
+
+/// A document library on a team's SharePoint site.
+#[derive(Debug, Deserialize)]
+pub struct Drive {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
     #[serde(rename = "webUrl", default)]
     pub web_url: Option<String>,
 }
@@ -84,6 +95,14 @@ impl GraphClient {
         let path = format!("/teams/{team_id}/channels/{channel_id}/filesFolder");
         let value = self.get(&path).await?;
         drive_item_from(&value).ok_or_else(|| not_an_item("filesFolder"))
+    }
+
+    /// Every document library on the group's site. A team id is its group
+    /// id; class teams have Class Materials and the assignment libraries
+    /// here next to the channels' one.
+    pub async fn group_drives(&self, group_id: &str) -> Result<Vec<Drive>> {
+        let values = self.get_all(&format!("/groups/{group_id}/drives")).await?;
+        Ok(serde_json::from_value(Value::Array(values))?)
     }
 
     pub async fn children(&self, drive_id: &str, item_id: &str) -> Result<Vec<DriveItem>> {
@@ -491,5 +510,31 @@ mod tests {
             Some("https://teams.microsoft.com/l/channel/x")
         );
         assert_eq!(channels[1].web_url, None);
+    }
+
+    #[test]
+    fn drives_deserialize_from_graph_shape() {
+        let drives: Vec<Drive> = serde_json::from_value(json!([
+            {
+                "id": "b!docs",
+                "name": "Dokumenty",
+                "driveType": "documentLibrary",
+                "description": "",
+                "createdDateTime": "2025-09-01T08:00:00Z",
+                "webUrl": "https://contoso.sharepoint.com/sites/Algo/Shared%20Documents",
+                "owner": {"group": {"id": "t1", "displayName": "Algorithms"}},
+                "quota": {"used": 1024}
+            },
+            {"id": "b!bare"}
+        ]))
+        .unwrap();
+        assert_eq!(drives[0].id, "b!docs");
+        assert_eq!(drives[0].name, "Dokumenty");
+        assert_eq!(
+            drives[0].web_url.as_deref(),
+            Some("https://contoso.sharepoint.com/sites/Algo/Shared%20Documents")
+        );
+        assert_eq!(drives[1].name, "");
+        assert_eq!(drives[1].web_url, None);
     }
 }

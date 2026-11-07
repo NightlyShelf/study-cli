@@ -1,5 +1,6 @@
 //! The Teams phase of `study sync` (SPEC §6): joined teams → channels →
-//! each channel's files folder → a recursive crawl of its drive items.
+//! each channel's files folder → a recursive crawl of its drive items, then
+//! the team's other document libraries (Class Materials in class teams).
 //!
 //! A team with a single channel is flattened: its files and messages hang
 //! off the team node and the channel node is dropped (SPEC §4.2).
@@ -11,7 +12,7 @@ use indicatif::ProgressBar;
 use study_core::config::Ui;
 use study_core::index::{File, Index, Node, NodeKind, Source, SourceKind};
 use study_graph::GraphClient;
-use study_graph::api::{Channel, DriveItem, Team};
+use study_graph::api::{Channel, Drive, DriveItem, Team};
 use study_graph::client::GRAPH_BASE;
 
 use crate::app;
@@ -63,12 +64,35 @@ pub async fn sync(
         }
         spinner.set_message(team.display_name.clone());
         let hidden_nodes = &hidden.hidden_nodes;
-        match crawl_team(graph, index, hidden_nodes, team, &mut nodes, &mut files).await {
-            Ok(()) => synced += 1,
-            Err(err) if !quiet => {
-                eprintln!("warning: skipping team '{}': {err:#}", team.display_name);
-            }
-            Err(_) => {}
+        let crawled =
+            match crawl_team(graph, index, hidden_nodes, team, &mut nodes, &mut files).await {
+                Ok(crawled) => crawled,
+                Err(err) => {
+                    if !quiet {
+                        eprintln!("warning: skipping team '{}': {err:#}", team.display_name);
+                    }
+                    continue;
+                }
+            };
+        synced += 1;
+        // The channel files are already in; a failure here only loses the
+        // extra libraries, not the team.
+        let libraries = crawl_libraries(
+            graph,
+            index,
+            hidden_nodes,
+            team,
+            &crawled,
+            &mut nodes,
+            &mut files,
+        );
+        if let Err(err) = libraries.await
+            && !quiet
+        {
+            eprintln!(
+                "warning: skipping the extra libraries of '{}': {err:#}",
+                team.display_name
+            );
         }
     }
     spinner.finish_and_clear();
@@ -91,7 +115,8 @@ pub async fn sync(
 
 /// One team's nodes and files, appended to `nodes` and `files`. A hidden
 /// channel or folder that is already in `old` is not fetched; its old rows
-/// are kept as they are.
+/// are kept as they are. Returns the drive ids the channels' files live in,
+/// kept channels included, so the libraries pass does not crawl them again.
 async fn crawl_team(
     graph: &GraphClient,
     old: &Index,
@@ -99,12 +124,13 @@ async fn crawl_team(
     team: &Team,
     nodes: &mut Vec<Node>,
     files: &mut Vec<File>,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let channels = graph.channels(&team.id).await.context("listing channels")?;
     // Counted before skipping hidden channels: the layout must not change
     // just because one is hidden. A lone channel has no node to hide.
     let flattened = channels.len() == 1;
     let mut folders = Vec::new();
+    let mut drives = Vec::new();
     let mut kept_nodes = Vec::new();
     let mut kept_files = Vec::new();
     for channel in channels {
@@ -113,6 +139,14 @@ async fn crawl_team(
             && hidden_nodes.contains(&channel_id)
             && let Some((old_nodes, old_files, _)) = old.subtree(&channel_id)
         {
+            // Its files folder is not fetched, so its drive comes from the
+            // old channel node's `<driveId>/<itemId>`.
+            if let Some((drive, _)) = old
+                .node(&channel_id)
+                .and_then(|n| n.remote_id.split_once('/'))
+            {
+                drives.push(drive.to_string());
+            }
             kept_nodes.extend(old_nodes);
             kept_files.extend(old_files);
             continue;
@@ -121,6 +155,7 @@ async fn crawl_team(
             .files_folder(&team.id, &channel.id)
             .await
             .with_context(|| format!("locating the files of '{}'", channel.display_name))?;
+        drives.extend(folder.parent_drive_id.clone());
         folders.push((channel, folder));
     }
 
@@ -134,7 +169,82 @@ async fn crawl_team(
             .await
             .with_context(|| format!("crawling '{}'", channel.display_name))?;
     }
+    Ok(drives)
+}
+
+/// Class teams keep Class Materials in a library of its own, outside every
+/// channel's folder. Each such library is crawled with its root items
+/// attached straight to the team node, so no library node sits in between.
+async fn crawl_libraries(
+    graph: &GraphClient,
+    old: &Index,
+    hidden_nodes: &[String],
+    team: &Team,
+    crawled: &[String],
+    nodes: &mut Vec<Node>,
+    files: &mut Vec<File>,
+) -> Result<()> {
+    let drives = graph
+        .group_drives(&team.id)
+        .await
+        .context("listing the team's libraries")?;
+    let team_id = format!("teams:{}", team.id);
+    for drive in extra_libraries(drives, crawled) {
+        let root = library_root(&drive.id);
+        crawl_folder(graph, old, hidden_nodes, &root, &team_id, nodes, files)
+            .await
+            .with_context(|| format!("crawling '{}'", drive.name))?;
+    }
     Ok(())
+}
+
+/// URL names of the libraries Teams for Education adds for assignments:
+/// students' submissions and the assignments system's own files, not course
+/// material. The URL name is matched, not the display name, because only
+/// the URL name survives a rename and the team's language (Class Materials
+/// shows up as "Materiały z zajęć" in a Polish team).
+const ASSIGNMENT_LIBRARIES: [&str; 2] = ["Student%20Work", "Class%20Files"];
+
+/// The team's libraries not yet crawled through a channel, minus the
+/// assignment ones.
+pub fn extra_libraries(drives: Vec<Drive>, crawled: &[String]) -> Vec<Drive> {
+    drives
+        .into_iter()
+        .filter(|drive| !crawled.contains(&drive.id))
+        .filter(|drive| !is_assignment_library(drive))
+        .collect()
+}
+
+/// SharePoint paths are case-insensitive, so the URL name is compared the
+/// same way.
+fn is_assignment_library(drive: &Drive) -> bool {
+    let Some(url) = drive.web_url.as_deref() else {
+        return false;
+    };
+    let url_name = url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    ASSIGNMENT_LIBRARIES
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(url_name))
+}
+
+/// A stand-in for the library's root folder: Graph accepts `root` as an
+/// item id, which saves a `GET /drives/{id}/root` per library.
+fn library_root(drive_id: &str) -> DriveItem {
+    DriveItem {
+        id: "root".to_string(),
+        name: String::new(),
+        size: None,
+        last_modified: None,
+        web_url: None,
+        is_folder: true,
+        parent_drive_id: Some(drive_id.to_string()),
+        parent_id: None,
+        deleted: false,
+    }
 }
 
 /// Depth-first over an explicit stack: an `async fn` cannot recurse without
@@ -358,6 +468,68 @@ mod tests {
             parent_id: Some("root-c1".to_string()),
             deleted: false,
         }
+    }
+
+    fn drive(id: &str, name: &str, url_name: &str) -> Drive {
+        Drive {
+            id: id.to_string(),
+            name: name.to_string(),
+            web_url: Some(format!(
+                "https://contoso.sharepoint.com/sites/Algo/{url_name}"
+            )),
+        }
+    }
+
+    fn ids(drives: &[Drive]) -> Vec<&str> {
+        drives.iter().map(|d| d.id.as_str()).collect()
+    }
+
+    #[test]
+    fn class_materials_is_the_only_extra_library() {
+        let drives = vec![
+            drive("b!docs", "Dokumenty", "Shared%20Documents"),
+            drive("b!mat", "Materiały z zajęć", "Materiay%20z%20zaj"),
+            drive("b!work", "Student Work", "Student%20Work"),
+            drive("b!files", "Class Files", "Class%20Files"),
+        ];
+        let extra = extra_libraries(drives, &["b!docs".to_string()]);
+        assert_eq!(ids(&extra), ["b!mat"]);
+    }
+
+    #[test]
+    fn assignment_libraries_match_by_url_name_not_display_name() {
+        let drives = vec![
+            // Renamed or localized, but the URL name gives them away.
+            drive("b!work", "Prace uczniów", "Student%20Work"),
+            drive("b!files", "Pliki zajęć", "class%20files/"),
+            // Named like one, but it is a different library.
+            drive("b!fake", "Student Work", "Student%20Work%20Archive"),
+            drive("b!mat", "Class Materials", "Class%20Materials"),
+        ];
+        let extra = extra_libraries(drives, &[]);
+        assert_eq!(ids(&extra), ["b!fake", "b!mat"]);
+    }
+
+    #[test]
+    fn a_team_without_extra_libraries_gets_none() {
+        let drives = vec![drive("b!docs", "Dokumenty", "Shared%20Documents")];
+        assert!(extra_libraries(drives, &["b!docs".to_string()]).is_empty());
+
+        // A library without a url cannot be an assignment one; it is kept.
+        let bare = Drive {
+            id: "b!bare".to_string(),
+            name: String::new(),
+            web_url: None,
+        };
+        assert_eq!(ids(&extra_libraries(vec![bare], &[])), ["b!bare"]);
+    }
+
+    #[test]
+    fn library_root_points_at_the_drive_root() {
+        let root = library_root("b!mat");
+        assert_eq!(root.id, "root");
+        assert_eq!(root.parent_drive_id.as_deref(), Some("b!mat"));
+        assert!(root.is_folder);
     }
 
     #[test]

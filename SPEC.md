@@ -131,7 +131,10 @@ purpose — "Enter again downloads" was too easy to trigger by accident.
 Teams layout: a team with only a **General** channel shows its files directly
 under the course (the channel is hidden) plus a `💬 Messages (General)` entry.
 A team with extra channels shows those as folders, each with its own messages
-entry.
+entry. In a class team the contents of Class Materials sit directly in the
+team's files, next to General's files and the channel folders, with no Class
+Materials node in between. Student Work and Class Files (assignment
+submissions) are not shown.
 
 ### 4.3 Reader overlay
 
@@ -339,10 +342,20 @@ Sync:
   a `delta` token per drive; every later sync calls `drives/{d}/root/delta`
   and applies only the changes, so Teams stays fully indexed but cheap to
   refresh. This keeps global `find` complete *and* fast after the first run.
+  Class teams (Teams for Education) keep Class Materials in a document
+  library of its own, not inside a channel folder, so after the channels sync
+  lists `groups/{id}/drives`. Every library not already crawled through a
+  channel's `filesFolder` is crawled from its root
+  (`drives/{d}/items/root/children`) and its root items attach directly to the
+  team node. The assignment libraries are left out. They are recognised by the
+  last segment of their `webUrl` (`Student%20Work`, `Class%20Files`), because
+  the display name is localized ("Materiały z zajęć") and can be renamed while
+  the URL name cannot. If listing or crawling the libraries fails, sync warns
+  and keeps the team's channel files.
   A team with a single (General) channel is flattened: its channel node is
   dropped and its files/messages attach directly to the course node (§4.2).
   Teams with extra channels keep per-channel folder nodes.
-  A hidden team skips `channels` entirely; a hidden channel skips
+  A hidden team skips `channels` and `drives` entirely; a hidden channel skips
   `filesFolder` and its crawl; a hidden folder is not descended into. Each
   keeps its previous index subtree. Flattening counts every listed channel,
   hidden ones included, so hiding a channel never flattens its team.
