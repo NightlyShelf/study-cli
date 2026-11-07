@@ -1,6 +1,7 @@
 //! `study todo [--all]` — assignments from the index, nearest due first (SPEC §8).
 
 use anyhow::Result;
+use jiff::tz::TimeZone;
 use study_core::config::Config;
 use study_core::index::{Event, EventKind, Index};
 
@@ -11,7 +12,7 @@ use crate::sync;
 pub async fn run(all: bool) -> Result<()> {
     let config = app::load_config()?;
     let index = app::fresh_index(&config).await?;
-    let rows = todo_rows(&index, &config, app::now(), all);
+    let rows = todo_rows(&index, &config, app::now(), &TimeZone::system(), all);
     if rows.is_empty() {
         eprintln!("nothing to do");
     }
@@ -19,9 +20,15 @@ pub async fn run(all: bool) -> Result<()> {
     Ok(())
 }
 
-/// Rows of `due, status, course, title`. Without `all`, done and long-past
-/// assignments are left out.
-pub fn todo_rows(index: &Index, config: &Config, now: u64, all: bool) -> Vec<Vec<String>> {
+/// Rows of `due, status, course, title`, far-off due dates in `tz`. Without
+/// `all`, done and long-past assignments are left out.
+pub fn todo_rows(
+    index: &Index,
+    config: &Config,
+    now: u64,
+    tz: &TimeZone,
+    all: bool,
+) -> Vec<Vec<String>> {
     let mut events: Vec<&Event> = index
         .events
         .iter()
@@ -39,7 +46,7 @@ pub fn todo_rows(index: &Index, config: &Config, now: u64, all: bool) -> Vec<Vec
             vec![
                 event
                     .due
-                    .map_or("-".to_string(), |due| human_until(due, now)),
+                    .map_or("-".to_string(), |due| human_until(due, now, tz)),
                 status_cell(event),
                 course_cell(index, config, event, 30),
                 event.title.clone(),
@@ -153,7 +160,7 @@ mod tests {
     #[test]
     fn open_work_sorted_by_due_with_undated_last() {
         let (index, config) = sample();
-        let rows = todo_rows(&index, &config, NOW, false);
+        let rows = todo_rows(&index, &config, NOW, &TimeZone::UTC, false);
         let titles: Vec<&str> = rows.iter().map(|row| row[3].as_str()).collect();
         assert_eq!(titles, ["Overdue", "Soon", "Later", "Undated"]);
         assert_eq!(rows[0][0], "2d ago");
@@ -168,7 +175,7 @@ mod tests {
     fn all_includes_done_and_ancient() {
         let (index, mut config) = sample();
         config.set_alias("moodle:7", "algo");
-        let rows = todo_rows(&index, &config, NOW, true);
+        let rows = todo_rows(&index, &config, NOW, &TimeZone::UTC, true);
         let titles: Vec<&str> = rows.iter().map(|row| row[3].as_str()).collect();
         assert_eq!(
             titles,
@@ -185,11 +192,11 @@ mod tests {
     fn hidden_courses_are_left_out_even_with_all() {
         let (mut index, mut config) = sample();
         config.ui.hidden_courses.push("moodle:7".to_string());
-        assert!(todo_rows(&index, &config, NOW, true).is_empty());
+        assert!(todo_rows(&index, &config, NOW, &TimeZone::UTC, true).is_empty());
         let mut orphan = event("e8", "Orphan", Some(NOW + DAY), Some("new"));
         orphan.course_id = None;
         index.events.push(orphan);
-        let rows = todo_rows(&index, &config, NOW, false);
+        let rows = todo_rows(&index, &config, NOW, &TimeZone::UTC, false);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][3], "Orphan");
     }

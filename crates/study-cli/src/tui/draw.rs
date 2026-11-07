@@ -1,5 +1,6 @@
 //! Rendering: tab bar, three columns, footer, overlays (SPEC §4).
 
+use jiff::civil::Weekday;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -11,7 +12,6 @@ use study_core::index::{Node, NodeKind, SourceKind};
 
 use crate::app;
 use crate::fmt::{date, human_age, human_size};
-use crate::tui::calendar;
 use crate::tui::reader;
 use crate::tui::state::{App, Mode, Pane, Tab, course_label};
 use crate::tui::todo::TodoRow;
@@ -252,7 +252,7 @@ fn draw_calendar(frame: &mut Frame, app: &App, area: Rect) {
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
     let paragraph = Paragraph::new(month_grid(app)).block(pane_block("Calendar", true));
     frame.render_widget(paragraph, grid);
-    let title = app.cal_day().map(|day| date(day.secs)).unwrap_or_default();
+    let title = app.cal_date.to_string();
     let width = usize::from(events.width.saturating_sub(2));
     let paragraph = Paragraph::new(day_events(app, width)).block(Block::bordered().title(title));
     frame.render_widget(paragraph, events);
@@ -261,27 +261,26 @@ fn draw_calendar(frame: &mut Frame, app: &App, area: Rect) {
 /// `October 2026`, the weekday row, then a line per week; `*` marks days
 /// with events, the selection is reversed and today underlined.
 fn month_grid(app: &App) -> Vec<Line<'static>> {
-    let today = calendar::civil(app::now());
-    let first = calendar::days_from_civil(app.cal_year, app.cal_month, 1);
-    let header = format!("{} {}", calendar::month_name(app.cal_month), app.cal_year);
+    let today = app.today();
+    let first = app.cal_date.first_of_month();
     let mut lines = vec![
-        Line::from(header).bold(),
+        Line::from(first.strftime("%B %Y").to_string()).bold(),
         Line::from("Mo  Tu  We  Th  Fr  Sa  Su").dim(),
     ];
-    let mut week = vec![Span::raw("    ".repeat(calendar::weekday(first) as usize))];
-    for (i, day) in app.cal_days.iter().enumerate() {
-        let number = i as u32 + 1;
+    let blanks = first.weekday().to_monday_zero_offset() as usize;
+    let mut week = vec![Span::raw("    ".repeat(blanks))];
+    for day in &app.cal_days {
         let marker = if day.events.is_empty() { ' ' } else { '*' };
-        let mut span = Span::raw(format!("{number:>2}{marker}"));
-        if number == app.cal_day {
+        let mut span = Span::raw(format!("{:>2}{marker}", day.date.day()));
+        if day.date == app.cal_date {
             span = span.reversed();
         }
-        if (app.cal_year, app.cal_month, number) == today {
+        if day.date == today {
             span = span.bold().underlined();
         }
         week.push(span);
         week.push(Span::raw(" "));
-        if calendar::weekday(first + i as i64) == 6 {
+        if day.date.weekday() == Weekday::Sunday {
             lines.push(Line::from(std::mem::take(&mut week)));
         }
     }
@@ -380,7 +379,7 @@ fn todo_detail(app: &App) -> Vec<String> {
         return vec!["no coursework selected".to_string()];
     };
     let due = match row.due {
-        Some(due) => format!("due {} ({})", date(due), row.due_text),
+        Some(due) => format!("due {} ({})", date(due, &app.tz), row.due_text),
         None => "no due date".to_string(),
     };
     let status = if row.status.is_empty() {
@@ -670,14 +669,13 @@ mod tests {
     fn calendar_tab_shows_the_grid_and_the_days_events() {
         let app = calendar_app();
         let text = render(&app);
-        let header = format!("{} {}", calendar::month_name(app.cal_month), app.cal_year);
-        assert!(text.contains(&header));
+        assert!(text.contains(&app.cal_date.strftime("%B %Y").to_string()));
         assert!(text.contains("Mo  Tu  We  Th  Fr  Sa  Su"));
-        assert!(text.contains(&format!("{:>2}*", app.cal_day)));
+        assert!(text.contains(&format!("{:>2}*", app.cal_date.day())));
         assert!(text.contains("09:00  due    Lab due"));
         assert!(text.contains("14:00  due    Exam"));
         assert!(text.contains("       algo"));
-        assert!(text.contains(&date(app.cal_day().unwrap().secs)));
+        assert!(text.contains(&app.cal_date.to_string()));
         assert!(text.contains("t today · J/K event"));
         assert!(!text.contains("no events"));
     }
@@ -689,7 +687,7 @@ mod tests {
         let text = render(&app);
         assert!(text.contains("no events"));
         assert!(!text.contains('*'));
-        assert!(text.contains(&format!("{:>2} ", app.cal_day)));
+        assert!(text.contains(&format!("{:>2} ", app.cal_date.day())));
     }
 
     #[test]

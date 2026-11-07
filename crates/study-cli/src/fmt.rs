@@ -2,6 +2,10 @@
 
 use std::io::IsTerminal;
 
+use jiff::Timestamp;
+use jiff::civil::DateTime;
+use jiff::tz::TimeZone;
+
 pub fn print_rows(rows: &[Vec<String>]) {
     if !std::io::stdout().is_terminal() {
         for row in rows {
@@ -47,28 +51,31 @@ pub fn human_size(size: Option<u64>) -> String {
     format!("{value:.1}P")
 }
 
-/// `5m`, `3h`, `3d`, `2w`, then a plain date; `-` when unknown.
+/// `5m`, `3h`, `3d`, `2w`, then a plain date; `-` when unknown. The date is
+/// UTC: it is a file's age two months or more back, where a day either way
+/// does not matter and a timezone argument through `ls` and `whoami` would.
 pub fn human_age(mtime: Option<u64>, now: u64) -> String {
     let Some(mtime) = mtime else {
         return "-".to_string();
     };
     match span(now.saturating_sub(mtime)) {
         Some(span) => span,
-        None => date(mtime),
+        None => date(mtime, &TimeZone::UTC),
     }
 }
 
-/// `in 3d`, `in 5h`, `2d ago`, then a plain date either way.
-pub fn human_until(due: u64, now: u64) -> String {
+/// `in 3d`, `in 5h`, `2d ago`, then a plain date in `tz` either way. Due
+/// dates are often local midnight, which is the day before in UTC.
+pub fn human_until(due: u64, now: u64, tz: &TimeZone) -> String {
     if due >= now {
         return match span(due - now) {
             Some(span) => format!("in {span}"),
-            None => date(due),
+            None => date(due, tz),
         };
     }
     match span(now - due) {
         Some(span) => format!("{span} ago"),
-        None => date(due),
+        None => date(due, tz),
     }
 }
 
@@ -83,33 +90,14 @@ fn span(secs: u64) -> Option<String> {
     }
 }
 
-/// `Mon`…`Sun` from unix seconds; day 0 (1970-01-01) was a Thursday.
-pub fn weekday(secs: u64) -> &'static str {
-    const NAMES: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    NAMES[(secs / 86_400 % 7) as usize]
+/// The wall-clock date and time of unix seconds in `tz`.
+pub fn local(secs: u64, tz: &TimeZone) -> DateTime {
+    tz.to_datetime(Timestamp::from_second(secs as i64).unwrap_or_default())
 }
 
-/// `YYYY-MM-DD` from unix seconds. The arithmetic is Howard Hinnant's
-/// `civil_from_days`, which saves a date crate for one column.
-pub fn date(secs: u64) -> String {
-    let days = (secs / 86_400) as i64 + 719_468;
-    let era = days.div_euclid(146_097);
-    let day_of_era = days.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    let mut year = year_of_era + era * 400;
-    if month <= 2 {
-        year += 1;
-    }
-    format!("{year:04}-{month:02}-{day:02}")
+/// `YYYY-MM-DD` of unix seconds in `tz`.
+pub fn date(secs: u64, tz: &TimeZone) -> String {
+    local(secs, tz).date().to_string()
 }
 
 #[cfg(test)]
@@ -139,28 +127,27 @@ mod tests {
     #[test]
     fn due_in() {
         let now = 1_700_000_000;
-        assert_eq!(human_until(now + 300, now), "in 5m");
-        assert_eq!(human_until(now + 5 * 3600, now), "in 5h");
-        assert_eq!(human_until(now + 3 * 86_400, now), "in 3d");
-        assert_eq!(human_until(now + 20 * 86_400, now), "in 2w");
-        assert_eq!(human_until(now - 2 * 86_400, now), "2d ago");
-        assert_eq!(human_until(now - 90 * 86_400, now), "2023-08-16");
-        assert_eq!(human_until(now + 90 * 86_400, now), "2024-02-12");
+        let utc = TimeZone::UTC;
+        assert_eq!(human_until(now + 300, now, &utc), "in 5m");
+        assert_eq!(human_until(now + 5 * 3600, now, &utc), "in 5h");
+        assert_eq!(human_until(now + 3 * 86_400, now, &utc), "in 3d");
+        assert_eq!(human_until(now + 20 * 86_400, now, &utc), "in 2w");
+        assert_eq!(human_until(now - 2 * 86_400, now, &utc), "2d ago");
+        assert_eq!(human_until(now - 90 * 86_400, now, &utc), "2023-08-16");
+        assert_eq!(human_until(now + 90 * 86_400, now, &utc), "2024-02-12");
+        // 22:13 UTC is past midnight two hours east.
+        let east = TimeZone::fixed(jiff::tz::offset(2));
+        assert_eq!(human_until(now + 90 * 86_400, now, &east), "2024-02-13");
     }
 
     #[test]
-    fn weekdays() {
-        assert_eq!(weekday(0), "Thu");
-        assert_eq!(weekday(86_399), "Thu");
-        assert_eq!(weekday(86_400), "Fri");
-        assert_eq!(weekday(951_782_400), "Tue"); // 2000-02-29
-        assert_eq!(weekday(1_700_000_000), "Tue"); // 2023-11-14
-    }
-
-    #[test]
-    fn dates() {
-        assert_eq!(date(0), "1970-01-01");
-        assert_eq!(date(951_782_400), "2000-02-29");
-        assert_eq!(date(1_700_000_000), "2023-11-14");
+    fn dates_follow_the_timezone() {
+        assert_eq!(date(0, &TimeZone::UTC), "1970-01-01");
+        assert_eq!(date(951_782_400, &TimeZone::UTC), "2000-02-29");
+        assert_eq!(date(1_700_000_000, &TimeZone::UTC), "2023-11-14");
+        // 2023-11-14 22:13 UTC is already the 15th two hours east.
+        let east = TimeZone::fixed(jiff::tz::offset(2));
+        assert_eq!(date(1_700_000_000, &east), "2023-11-15");
+        assert_eq!(local(1_700_000_000, &east).hour(), 0);
     }
 }

@@ -11,8 +11,11 @@ use study_moodle::MoodleClient;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use anyhow::Context;
+use jiff::civil::Date;
+use jiff::tz::TimeZone;
 
 use crate::app;
+use crate::fmt;
 use crate::tui::calendar::{self, CalEntry, Day};
 use crate::tui::reader::Reader;
 use crate::tui::tasks::Msg;
@@ -77,10 +80,10 @@ pub struct App {
     pub todo_all: bool,
     /// How many rows `todo_all` would reveal.
     pub todo_hidden: usize,
-    /// The month shown in the Calendar tab and the selected day (1-based).
-    pub cal_year: i64,
-    pub cal_month: u32,
-    pub cal_day: u32,
+    /// Where "today" is and which day an event falls on.
+    pub tz: TimeZone,
+    /// The selected day in the Calendar tab; its month is the one shown.
+    pub cal_date: Date,
     /// Which of the selected day's events `Enter` and `o` act on.
     pub cal_sel: usize,
     pub cal_days: Vec<Day>,
@@ -107,9 +110,10 @@ impl App {
         client: Option<MoodleClient>,
         graph: Option<GraphClient>,
         download_dir: PathBuf,
+        tz: TimeZone,
     ) -> App {
         let (tx, rx) = mpsc::unbounded_channel();
-        let (cal_year, cal_month, cal_day) = calendar::civil(app::now());
+        let cal_date = fmt::local(app::now(), &tz).date();
         let mut app = App {
             config,
             config_path: config::default_path(),
@@ -132,9 +136,8 @@ impl App {
             todo_sel: 0,
             todo_all: false,
             todo_hidden: 0,
-            cal_year,
-            cal_month,
-            cal_day,
+            tz,
+            cal_date,
             cal_sel: 0,
             cal_days: Vec::new(),
             reader: None,
@@ -223,8 +226,12 @@ impl App {
         self.todo_rows.get(self.todo_sel)
     }
 
+    pub fn today(&self) -> Date {
+        fmt::local(app::now(), &self.tz).date()
+    }
+
     pub fn cal_day(&self) -> Option<&Day> {
-        self.cal_days.get((self.cal_day as usize).saturating_sub(1))
+        self.cal_days.get(self.cal_date.day() as usize - 1)
     }
 
     pub fn cal_entry(&self) -> Option<&CalEntry> {
@@ -232,23 +239,18 @@ impl App {
     }
 
     pub fn rebuild_calendar(&mut self) {
-        self.cal_days = calendar::month_days_with_events(
-            &self.index,
-            &self.config,
-            self.cal_year,
-            self.cal_month,
-        );
+        self.cal_days =
+            calendar::month_days_with_events(&self.index, &self.config, &self.tz, self.cal_date);
         let events = self.cal_day().map_or(0, |day| day.events.len());
         self.cal_sel = self.cal_sel.min(events.saturating_sub(1));
     }
 
     /// Selects a date, swapping the month's days in when it changes.
-    pub fn set_date(&mut self, year: i64, month: u32, day: u32) {
-        self.cal_day = day.clamp(1, calendar::month_days(year, month));
+    pub fn set_date(&mut self, date: Date) {
+        let new_month = date.first_of_month() != self.cal_date.first_of_month();
+        self.cal_date = date;
         self.cal_sel = 0;
-        if (year, month) != (self.cal_year, self.cal_month) {
-            self.cal_year = year;
-            self.cal_month = month;
+        if new_month {
             self.rebuild_calendar();
         }
     }
@@ -260,7 +262,7 @@ impl App {
 
     pub fn rebuild_todo(&mut self) {
         let now = app::now();
-        let all = todo::todo_rows(&self.index, &self.config, now);
+        let all = todo::todo_rows(&self.index, &self.config, now, &self.tz);
         let total = all.len();
         self.todo_rows = all
             .into_iter()
@@ -363,7 +365,14 @@ pub mod tests {
     pub fn app() -> App {
         let mut config = Config::default();
         config.set_alias("moodle:1", "algo");
-        let mut app = App::new(config, sample(), None, None, PathBuf::from("/tmp"));
+        let mut app = App::new(
+            config,
+            sample(),
+            None,
+            None,
+            PathBuf::from("/tmp"),
+            TimeZone::UTC,
+        );
         // A stray `a` or `x` in a test must never touch the real config.
         app.config_path = std::env::temp_dir().join("study-tui-tests/config.toml");
         app
@@ -455,19 +464,15 @@ pub mod tests {
     #[test]
     fn calendar_opens_on_today_and_follows_set_date() {
         let mut app = calendar_app();
-        let (year, month, day) = calendar::civil(app::now());
-        assert_eq!(
-            (app.cal_year, app.cal_month, app.cal_day),
-            (year, month, day)
-        );
-        assert_eq!(app.cal_days.len() as u32, calendar::month_days(year, month));
+        let today = app.today();
+        assert_eq!(app.cal_date, today);
+        assert_eq!(app.cal_days.len(), today.days_in_month() as usize);
         assert_eq!(app.cal_day().unwrap().events.len(), 2);
         app.move_event_sel(5);
         assert_eq!(app.cal_sel, 1);
         assert_eq!(app.cal_entry().unwrap().title, "Exam");
-        // A day past the month's end clamps; a new month rebuilds the days.
-        app.set_date(2024, 2, 31);
-        assert_eq!((app.cal_year, app.cal_month, app.cal_day), (2024, 2, 29));
+        // A new month rebuilds the days.
+        app.set_date(jiff::civil::date(2024, 2, 29));
         assert_eq!(app.cal_days.len(), 29);
         assert_eq!(app.cal_sel, 0);
         assert!(app.cal_entry().is_none());
@@ -477,7 +482,14 @@ pub mod tests {
     fn hidden_courses_are_skipped_until_show_all() {
         let mut config = Config::default();
         config.ui.hidden_courses.push("moodle:1".to_string());
-        let mut app = App::new(config, sample(), None, None, PathBuf::from("/tmp"));
+        let mut app = App::new(
+            config,
+            sample(),
+            None,
+            None,
+            PathBuf::from("/tmp"),
+            TimeZone::UTC,
+        );
         assert_eq!(app.courses, ["moodle:2"]);
         app.toggle_show_all();
         assert_eq!(app.courses, ["moodle:1", "moodle:2"]);

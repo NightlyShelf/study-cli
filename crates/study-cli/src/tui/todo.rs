@@ -1,6 +1,7 @@
 //! The Todo tab's rows: coursework from the index, soonest due first
 //! (SPEC §8). Pure functions over the index so the tab needs no network.
 
+use jiff::tz::TimeZone;
 use study_core::config::Config;
 use study_core::index::{EventKind, Index};
 
@@ -26,8 +27,9 @@ pub struct TodoRow {
 }
 
 /// Every coursework event, due ascending with undated work last, then by
-/// title. Filtering by `is_current` is the caller's choice.
-pub fn todo_rows(index: &Index, config: &Config, now: u64) -> Vec<TodoRow> {
+/// title; far-off due dates are shown in `tz`. Filtering by `is_current` is
+/// the caller's choice.
+pub fn todo_rows(index: &Index, config: &Config, now: u64, tz: &TimeZone) -> Vec<TodoRow> {
     let mut rows: Vec<TodoRow> = index
         .events
         .iter()
@@ -45,7 +47,7 @@ pub fn todo_rows(index: &Index, config: &Config, now: u64) -> Vec<TodoRow> {
                 due: event.due,
                 due_text: event
                     .due
-                    .map_or("-".to_string(), |due| fmt::human_until(due, now)),
+                    .map_or("-".to_string(), |due| fmt::human_until(due, now, tz)),
                 status: status_text(event.status.as_deref(), event.grade.as_deref()),
                 course,
                 title: event.title.clone(),
@@ -140,7 +142,7 @@ pub mod tests {
             .push(event(50, 5, "moodle:1", "Late", Some(NOW - 2 * 86_400)));
         let mut config = Config::default();
         config.set_alias("moodle:1", "algo");
-        let rows = todo_rows(&index, &config, NOW);
+        let rows = todo_rows(&index, &config, NOW, &TimeZone::UTC);
         let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
         assert_eq!(titles, ["Late", "Homework 1", "Essay"]);
         assert_eq!(rows[0].due_text, "2d ago");
@@ -162,7 +164,7 @@ pub mod tests {
         index
             .events
             .push(event(40, 4, "moodle:1", "Recent", Some(NOW - 13 * 86_400)));
-        let rows = todo_rows(&index, &Config::default(), NOW);
+        let rows = todo_rows(&index, &Config::default(), NOW, &TimeZone::UTC);
         let current: Vec<&str> = rows
             .iter()
             .filter(|row| is_current(row, NOW))
@@ -179,7 +181,7 @@ pub mod tests {
     fn hidden_courses_have_no_rows() {
         let mut config = Config::default();
         config.ui.hidden_courses.push("moodle:2".to_string());
-        let rows = todo_rows(&coursework(NOW), &config, NOW);
+        let rows = todo_rows(&coursework(NOW), &config, NOW, &TimeZone::UTC);
         let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
         assert_eq!(titles, ["Essay"]);
     }

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-use crate::app;
-use crate::tui::calendar;
+use jiff::ToSpan;
+
 use crate::tui::reader;
 use crate::tui::state::{App, Mode, Pane, Tab, course_label};
 use crate::tui::tasks;
@@ -67,27 +67,19 @@ fn browse(app: &mut App, code: KeyCode) {
 }
 
 fn calendar(app: &mut App, code: KeyCode, pending_g: bool) {
-    let (year, month, day) = (app.cal_year, app.cal_month, app.cal_day);
+    let date = app.cal_date;
     match code {
-        KeyCode::Char('h') | KeyCode::Left => move_day(app, -1),
-        KeyCode::Char('l') | KeyCode::Right => move_day(app, 1),
-        KeyCode::Char('j') | KeyCode::Down => move_day(app, 7),
-        KeyCode::Char('k') | KeyCode::Up => move_day(app, -7),
-        KeyCode::Char('H') => {
-            let (year, month) = calendar::add_months(year, month, -1);
-            app.set_date(year, month, day);
-        }
-        KeyCode::Char('L') => {
-            let (year, month) = calendar::add_months(year, month, 1);
-            app.set_date(year, month, day);
-        }
-        KeyCode::Char('t') => {
-            let (year, month, day) = calendar::civil(app::now());
-            app.set_date(year, month, day);
-        }
-        KeyCode::Char('g') if pending_g => app.set_date(year, month, 1),
+        KeyCode::Char('h') | KeyCode::Left => app.set_date(date.saturating_add(-1.days())),
+        KeyCode::Char('l') | KeyCode::Right => app.set_date(date.saturating_add(1.days())),
+        KeyCode::Char('j') | KeyCode::Down => app.set_date(date.saturating_add(1.weeks())),
+        KeyCode::Char('k') | KeyCode::Up => app.set_date(date.saturating_add(-1.weeks())),
+        // Adding months keeps the day, clamped to the month's last.
+        KeyCode::Char('H') => app.set_date(date.saturating_add(-1.months())),
+        KeyCode::Char('L') => app.set_date(date.saturating_add(1.months())),
+        KeyCode::Char('t') => app.set_date(app.today()),
+        KeyCode::Char('g') if pending_g => app.set_date(date.first_of_month()),
         KeyCode::Char('g') => app.pending_g = true,
-        KeyCode::Char('G') => app.set_date(year, month, calendar::month_days(year, month)),
+        KeyCode::Char('G') => app.set_date(date.last_of_month()),
         KeyCode::Char('J') => app.move_event_sel(1),
         KeyCode::Char('K') => app.move_event_sel(-1),
         KeyCode::Char('o') => {
@@ -97,11 +89,6 @@ fn calendar(app: &mut App, code: KeyCode, pending_g: bool) {
         KeyCode::Enter => calendar_enter(app),
         _ => {}
     }
-}
-
-fn move_day(app: &mut App, delta: i64) {
-    let (year, month, day) = calendar::add_days(app.cal_year, app.cal_month, app.cal_day, delta);
-    app.set_date(year, month, day);
 }
 
 /// Shows the event's course in the Files tab; the event itself has no
@@ -651,34 +638,30 @@ mod tests {
     #[test]
     fn calendar_keys_move_by_day_week_and_month() {
         let mut app = calendar_app();
-        let (year, month, day) = calendar::civil(app::now());
-        let next = calendar::add_months(year, month, 1);
+        let today = app.today();
         press(&mut app, KeyCode::Char('G'));
-        assert_eq!(app.cal_day, calendar::month_days(year, month));
+        assert_eq!(app.cal_date, today.last_of_month());
         // Past the last day: the next month comes in, on its first day.
         press(&mut app, KeyCode::Char('l'));
-        assert_eq!(
-            (app.cal_year, app.cal_month, app.cal_day),
-            (next.0, next.1, 1)
-        );
+        let next = today.last_of_month().tomorrow().unwrap();
+        assert_eq!(app.cal_date, next);
+        assert_eq!(app.cal_days[0].date, next);
         press(&mut app, KeyCode::Char('H'));
-        assert_eq!((app.cal_year, app.cal_month, app.cal_day), (year, month, 1));
+        assert_eq!(app.cal_date, today.first_of_month());
         press(&mut app, KeyCode::Char('L'));
-        assert_eq!((app.cal_year, app.cal_month), next);
+        assert_eq!(app.cal_date, next);
         press(&mut app, KeyCode::Char('t'));
-        assert_eq!(
-            (app.cal_year, app.cal_month, app.cal_day),
-            (year, month, day)
-        );
+        assert_eq!(app.cal_date, today);
         press(&mut app, KeyCode::Char('k'));
         press(&mut app, KeyCode::Char('j'));
-        assert_eq!(
-            (app.cal_year, app.cal_month, app.cal_day),
-            (year, month, day)
-        );
+        assert_eq!(app.cal_date, today);
         press(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('g'));
-        assert_eq!(app.cal_day, 1);
+        assert_eq!(app.cal_date.day(), 1);
+        // A month on from the 31st clamps to the next month's last day.
+        app.set_date(jiff::civil::date(2024, 1, 31));
+        press(&mut app, KeyCode::Char('L'));
+        assert_eq!(app.cal_date, jiff::civil::date(2024, 2, 29));
         assert_eq!(app.tab, Tab::Calendar);
     }
 

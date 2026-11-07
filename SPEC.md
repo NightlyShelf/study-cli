@@ -383,6 +383,10 @@ Upload (`study put <file> --to <target>`):
 
 ## 8. Calendar and todo
 
+- Days ("today", which day an event falls on, the month grid) and clock
+  times are in the system's local timezone, DST-correct (`jiff`, reading the
+  system tzdb). The index keeps unix seconds. File ages older than 60 days
+  fall back to a UTC date, where a day either way does not matter.
 - `study cal` (Calendar tab): `core_calendar_get_calendar_events` for the
   range, rendered day-grouped; `--month` renders a grid. These are the raw
   events you asked for.
@@ -506,7 +510,7 @@ and index paths). No wall of prose; examples over explanation.
 | 2 | `login moodle`, `sync`, `ls`, `find`, `get` for Moodle | done 2026-10-19 (`d132979`); real-site run: 15 courses / 1447 files |
 | 3 | TUI Files tab (Moodle), aliases, reader overlay for pages | done 2026-10-19 |
 | 4 | `put` for Moodle assignments; Todo tab | done 2026-10-19; real sync 15 courses / 326 files / 70 assignments in 4.7 s |
-| 5 | Calendar tab, `cal` | done 2026-10-19 (times shown in UTC; no date crate) |
+| 5 | Calendar tab, `cal` | done 2026-10-19; local time via `jiff` 2026-11-07 |
 | 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | implemented 2026-10-19; first real `login teams` succeeded 2026-11-07 |
 | 7 | Shell completions, `whoami`, incremental sync, polish | completions + whoami done 2026-10-19; files view, hiding, subsections, styled reader, `completions --install` 2026-10-22; Teams `delta` sync pending |
 
