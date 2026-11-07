@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use indicatif::ProgressBar;
+use study_core::config::Ui;
 use study_core::index::{File, Index, Node, NodeKind, Source, SourceKind};
 use study_graph::GraphClient;
 use study_graph::api::{Channel, DriveItem, Team};
@@ -24,8 +25,14 @@ pub enum Mapped {
 
 /// Crawls every joined team into `index` and returns the summary fragment
 /// for the sync line. A team that fails is skipped with a warning; only a
-/// dead login or an unreachable Graph fails the phase.
-pub async fn sync(graph: &GraphClient, index: &mut Index, quiet: bool) -> Result<String> {
+/// dead login or an unreachable Graph fails the phase. A hidden team that is
+/// already indexed is not fetched; its old rows are kept as they are.
+pub async fn sync(
+    graph: &GraphClient,
+    index: &mut Index,
+    hidden: &Ui,
+    quiet: bool,
+) -> Result<String> {
     let teams = match graph.joined_teams().await {
         Ok(teams) => teams,
         Err(study_graph::Error::AuthExpired(_)) => {
@@ -43,9 +50,20 @@ pub async fn sync(graph: &GraphClient, index: &mut Index, quiet: bool) -> Result
     let mut nodes = Vec::new();
     let mut files = Vec::new();
     let mut synced = 0;
+    let mut kept = 0;
     for team in &teams {
+        let team_id = format!("teams:{}", team.id);
+        if hidden.hidden_courses.contains(&team_id)
+            && let Some((old_nodes, old_files, _)) = index.subtree(&team_id)
+        {
+            nodes.extend(old_nodes);
+            files.extend(old_files);
+            kept += 1;
+            continue;
+        }
         spinner.set_message(team.display_name.clone());
-        match crawl_team(graph, team, &mut nodes, &mut files).await {
+        let hidden_nodes = &hidden.hidden_nodes;
+        match crawl_team(graph, index, hidden_nodes, team, &mut nodes, &mut files).await {
             Ok(()) => synced += 1,
             Err(err) if !quiet => {
                 eprintln!("warning: skipping team '{}': {err:#}", team.display_name);
@@ -62,22 +80,43 @@ pub async fn sync(graph: &GraphClient, index: &mut Index, quiet: bool) -> Result
         last_sync: Some(app::now()),
         delta_token: None,
     };
-    let summary = format!("{synced} teams, {} team files", files.len());
+    let mut summary = format!("{synced} teams, {} team files", files.len());
+    if kept > 0 {
+        summary.push_str(&format!(" ({kept} hidden teams kept)"));
+    }
     index.replace_source(source, nodes, files, vec![]);
     app::persist_graph_token(graph)?;
     Ok(summary)
 }
 
-/// One team's nodes and files, appended to `nodes` and `files`.
+/// One team's nodes and files, appended to `nodes` and `files`. A hidden
+/// channel or folder that is already in `old` is not fetched; its old rows
+/// are kept as they are.
 async fn crawl_team(
     graph: &GraphClient,
+    old: &Index,
+    hidden_nodes: &[String],
     team: &Team,
     nodes: &mut Vec<Node>,
     files: &mut Vec<File>,
 ) -> Result<()> {
     let channels = graph.channels(&team.id).await.context("listing channels")?;
+    // Counted before skipping hidden channels: the layout must not change
+    // just because one is hidden. A lone channel has no node to hide.
+    let flattened = channels.len() == 1;
     let mut folders = Vec::new();
+    let mut kept_nodes = Vec::new();
+    let mut kept_files = Vec::new();
     for channel in channels {
+        let channel_id = format!("teams:chan:{}", channel.id);
+        if !flattened
+            && hidden_nodes.contains(&channel_id)
+            && let Some((old_nodes, old_files, _)) = old.subtree(&channel_id)
+        {
+            kept_nodes.extend(old_nodes);
+            kept_files.extend(old_files);
+            continue;
+        }
         let folder = graph
             .files_folder(&team.id, &channel.id)
             .await
@@ -85,14 +124,13 @@ async fn crawl_team(
         folders.push((channel, folder));
     }
 
-    let flattened = folders.len() == 1;
-    nodes.extend(map_team(team, &folders));
+    // Kept channels go after the team node and the fresh channels.
+    nodes.extend(map_team(team, &folders, flattened));
+    nodes.extend(kept_nodes);
+    files.extend(kept_files);
     for (channel, folder) in &folders {
         let parent = files_parent_id(team, channel, flattened);
-        let Some(drive) = folder.parent_drive_id.as_deref() else {
-            bail!("'{}' has no drive", channel.display_name);
-        };
-        crawl_folder(graph, drive, &folder.id, &parent, nodes, files)
+        crawl_folder(graph, old, hidden_nodes, folder, &parent, nodes, files)
             .await
             .with_context(|| format!("crawling '{}'", channel.display_name))?;
     }
@@ -103,17 +141,28 @@ async fn crawl_team(
 /// boxing, and the order of index rows does not matter.
 async fn crawl_folder(
     graph: &GraphClient,
-    drive: &str,
-    root: &str,
+    old: &Index,
+    hidden_nodes: &[String],
+    root: &DriveItem,
     parent: &str,
     nodes: &mut Vec<Node>,
     files: &mut Vec<File>,
 ) -> Result<()> {
-    let mut pending = vec![(parent.to_string(), root.to_string())];
+    let Some(drive) = root.parent_drive_id.as_deref() else {
+        bail!("the files folder has no drive");
+    };
+    let mut pending = vec![(parent.to_string(), root.id.clone())];
     while let Some((parent, item_id)) = pending.pop() {
         for item in graph.children(drive, &item_id).await? {
             match map_item(&parent, drive, &item) {
                 Some(Mapped::Folder(node)) => {
+                    if hidden_nodes.contains(&node.id)
+                        && let Some((old_nodes, old_files, _)) = old.subtree(&node.id)
+                    {
+                        nodes.extend(old_nodes);
+                        files.extend(old_files);
+                        continue;
+                    }
                     pending.push((node.id.clone(), item.id.clone()));
                     nodes.push(node);
                 }
@@ -127,12 +176,13 @@ async fn crawl_folder(
 
 /// The team node, plus a channel node per channel when there are several,
 /// plus a messages module per channel. `channels` pairs each channel with
-/// its files folder; its drive and id become the node's remote id.
-pub fn map_team(team: &Team, channels: &[(Channel, DriveItem)]) -> Vec<Node> {
+/// its files folder; its drive and id become the node's remote id. The
+/// caller decides `flattened` from the full channel count, since hidden
+/// channels are left out of `channels`.
+pub fn map_team(team: &Team, channels: &[(Channel, DriveItem)], flattened: bool) -> Vec<Node> {
     let team_id = format!("teams:{}", team.id);
-    let flattened = channels.len() == 1;
     let team_remote_id = match channels {
-        [(_, folder)] => folder_remote_id(folder),
+        [(_, folder)] if flattened => folder_remote_id(folder),
         _ => team.id.clone(),
     };
     let mut nodes = vec![Node {
@@ -312,7 +362,7 @@ mod tests {
 
     #[test]
     fn single_channel_is_flattened_onto_the_team() {
-        let nodes = map_team(&team(), &[channel("c1", "General")]);
+        let nodes = map_team(&team(), &[channel("c1", "General")], true);
 
         let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(ids, ["teams:t1", "teams:msg:c1"]);
@@ -337,7 +387,11 @@ mod tests {
 
     #[test]
     fn several_channels_get_their_own_nodes() {
-        let nodes = map_team(&team(), &[channel("c1", "General"), channel("c2", "Labs")]);
+        let nodes = map_team(
+            &team(),
+            &[channel("c1", "General"), channel("c2", "Labs")],
+            false,
+        );
 
         let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(
@@ -369,8 +423,20 @@ mod tests {
     }
 
     #[test]
+    fn hidden_sibling_keeps_the_team_unflattened() {
+        // Labs is hidden, so only General was fetched, but the team still
+        // has two channels and keeps the per-channel layout.
+        let nodes = map_team(&team(), &[channel("c1", "General")], false);
+
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["teams:t1", "teams:chan:c1", "teams:msg:c1"]);
+        assert_eq!(nodes[0].remote_id, "t1");
+        assert_eq!(nodes[2].parent.as_deref(), Some("teams:chan:c1"));
+    }
+
+    #[test]
     fn team_without_channels_is_just_the_team() {
-        let nodes = map_team(&team(), &[]);
+        let nodes = map_team(&team(), &[], false);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].remote_id, "t1");
     }

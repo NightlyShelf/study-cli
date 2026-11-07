@@ -46,12 +46,17 @@ pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
     let mut index = app::load_index()?;
     let mut summary = Vec::new();
     match moodle {
-        Ok(client) => summary.push(sync_moodle(&client, &mut index, quiet).await?),
+        Ok(client) => {
+            let hidden = &config.ui.hidden_courses;
+            summary.push(sync_moodle(&client, &mut index, hidden, quiet).await?);
+        }
         Err(err) if !quiet => eprintln!("skipping Moodle: {err}"),
         Err(_) => {}
     }
     match graph {
-        Ok(client) => summary.push(teams_sync::sync(&client, &mut index, quiet).await?),
+        Ok(client) => {
+            summary.push(teams_sync::sync(&client, &mut index, &config.ui, quiet).await?);
+        }
         Err(err) if !quiet => eprintln!("skipping Teams: {err}"),
         Err(_) => {}
     }
@@ -63,9 +68,15 @@ pub async fn sync(config: &Config, quiet: bool) -> Result<Index> {
 }
 
 /// Full Moodle crawl into `index`: site info → courses → contents of each
-/// course. ~10 round-trips, so a sequential loop is fine. Returns the
-/// summary fragment for the sync line.
-async fn sync_moodle(client: &MoodleClient, index: &mut Index, quiet: bool) -> Result<String> {
+/// course. ~10 round-trips, so a sequential loop is fine. A hidden course
+/// that is already indexed is not fetched; its old rows are kept as they
+/// are. Returns the summary fragment for the sync line.
+async fn sync_moodle(
+    client: &MoodleClient,
+    index: &mut Index,
+    hidden_courses: &[String],
+    quiet: bool,
+) -> Result<String> {
     let site = match client.site_info().await {
         Ok(site) => site,
         Err(study_moodle::Error::TokenExpired(_)) => {
@@ -86,7 +97,19 @@ async fn sync_moodle(client: &MoodleClient, index: &mut Index, quiet: bool) -> R
     spinner.enable_steady_tick(Duration::from_millis(100));
     let mut nodes = Vec::new();
     let mut files = Vec::new();
+    let mut kept_events = Vec::new();
+    let mut course_ids = Vec::new();
     for course in &courses {
+        let course_id = format!("moodle:{}", course.id);
+        if hidden_courses.contains(&course_id)
+            && let Some((old_nodes, old_files, old_events)) = index.subtree(&course_id)
+        {
+            nodes.extend(old_nodes);
+            files.extend(old_files);
+            kept_events.extend(old_events);
+            continue;
+        }
+        course_ids.push(course.id);
         spinner.set_message(course.fullname.clone());
         let sections = client
             .course_contents(course.id)
@@ -98,11 +121,15 @@ async fn sync_moodle(client: &MoodleClient, index: &mut Index, quiet: bool) -> R
     }
 
     spinner.set_message("assignments");
-    let course_ids: Vec<u64> = courses.iter().map(|course| course.id).collect();
-    let assignments = client
-        .assignments(&course_ids)
-        .await
-        .context("listing assignments")?;
+    // An empty course list would ask Moodle for every course's assignments.
+    let assignments = if course_ids.is_empty() {
+        Vec::new()
+    } else {
+        client
+            .assignments(&course_ids)
+            .await
+            .context("listing assignments")?
+    };
     for assignment in &assignments {
         files.extend(map_handouts(assignment, &nodes));
     }
@@ -118,14 +145,19 @@ async fn sync_moodle(client: &MoodleClient, index: &mut Index, quiet: bool) -> R
     let calendar = calendar_events(client, &course_ids, app::now(), quiet).await;
     let calendar_count = calendar.len();
     events.extend(calendar);
+    events.extend(kept_events);
     spinner.finish_and_clear();
-    let summary = format!(
+    let mut summary = format!(
         "{} courses, {} files, {} assignments, {} events",
-        courses.len(),
+        course_ids.len(),
         files.len(),
         assignments.len(),
         calendar_count
     );
+    let hidden = courses.len() - course_ids.len();
+    if hidden > 0 {
+        summary.push_str(&format!(" ({hidden} hidden courses kept)"));
+    }
 
     let source = Source {
         kind: SourceKind::Moodle,

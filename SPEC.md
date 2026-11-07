@@ -98,6 +98,11 @@ pane) and persists it in `config.toml` under `[ui]` (`hidden_courses`,
 view; the all view shows them dimmed with a `hidden` tag, where `x`
 restores them. Hidden courses are also left out of the Calendar and Todo
 tabs and of `study cal` / `study todo` (§8).
+Sync does not fetch what is hidden: a hidden course or team, channel or
+Teams folder keeps its previous index entries unchanged (so the all view can
+still show and restore it) and is fetched fresh on the first sync after it is
+unhidden. Something hidden but never indexed is synced once. Hidden Moodle
+sections and modules are still fetched, since Moodle contents come per course.
 
 ### 4.1 Course aliases
 
@@ -324,6 +329,10 @@ Sync:
   Module mtime = max file `timemodified`, else
   `contentsinfo.lastmodified`. This mtime feeds both incremental sync and the
   skip-if-identical download check. Full sync of ~10 courses < 5 s.
+  A hidden, already-indexed course (§4) is skipped: no
+  `core_course_get_contents`, and it is left out of the course ids passed to
+  `mod_assign_get_assignments` and `core_calendar_get_calendar_events`; its
+  old nodes, files and events are carried over.
 - Teams: first sync does a one-time deep crawl — `me/joinedTeams` →
   `teams/{id}/channels` → `channels/{id}/filesFolder` →
   `drives/{d}/items/{id}/children` recursively (the slow 10–30 s). It stores
@@ -333,6 +342,10 @@ Sync:
   A team with a single (General) channel is flattened: its channel node is
   dropped and its files/messages attach directly to the course node (§4.2).
   Teams with extra channels keep per-channel folder nodes.
+  A hidden team skips `channels` entirely; a hidden channel skips
+  `filesFolder` and its crawl; a hidden folder is not descended into. Each
+  keeps its previous index subtree. Flattening counts every listed channel,
+  hidden ones included, so hiding a channel never flattens its team.
   Index convention: Teams nodes carry `<driveId>/<itemId>` in `remote_id`
   (a flattened Team, a Channel, a Folder) and the messages entry carries
   `<teamId>/<channelId>`; files store the Graph `…/content` url. v1 does a

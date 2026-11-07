@@ -149,6 +149,36 @@ impl Index {
         self.nodes.iter().find(|node| node.id == id)
     }
 
+    /// `root` and everything beneath it: its descendant nodes (root first),
+    /// the files on any of them, and the events of `root` as a course.
+    /// `None` when `root` is not indexed. Sync carries a hidden subtree over
+    /// with this instead of fetching it, since `replace_source` would
+    /// otherwise drop it.
+    pub fn subtree(&self, root: &str) -> Option<(Vec<Node>, Vec<File>, Vec<Event>)> {
+        let mut nodes = vec![self.node(root)?.clone()];
+        let mut next = 0;
+        while next < nodes.len() {
+            let id = nodes[next].id.clone();
+            nodes.extend(self.children(&id).into_iter().cloned());
+            next += 1;
+        }
+
+        let ids: HashSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
+        let files = self
+            .files
+            .iter()
+            .filter(|file| ids.contains(file.node.as_str()))
+            .cloned()
+            .collect();
+        let events = self
+            .events
+            .iter()
+            .filter(|event| event.course_id.as_deref() == Some(root))
+            .cloned()
+            .collect();
+        Some((nodes, files, events))
+    }
+
     /// Swap in a fresh sync result for one source, leaving the other
     /// source untouched.
     pub fn replace_source(
@@ -392,6 +422,48 @@ mod tests {
         assert_eq!(index.files_in("moodle:sec:3")[0].id, "moodle:f1");
         assert_eq!(index.node("moodle:2").unwrap().name, "Algebra");
         assert!(index.node("nope").is_none());
+    }
+
+    #[test]
+    fn subtree_collects_everything_beneath() {
+        let mut index = sample();
+        index.nodes.push(node(
+            "moodle:mod:4",
+            SourceKind::Moodle,
+            NodeKind::Folder,
+            Some("moodle:sec:3"),
+            "Slides",
+        ));
+        index.files.push(file("moodle:f2", "moodle:mod:4"));
+        index.files.push(file("moodle:f3", "moodle:1"));
+        let mut course_event = event("moodle:e2", SourceKind::Moodle);
+        course_event.course_id = Some("moodle:1".to_string());
+        index.events.push(course_event);
+        let mut other_event = event("moodle:e3", SourceKind::Moodle);
+        other_event.course_id = Some("moodle:2".to_string());
+        index.events.push(other_event);
+
+        let (nodes, files, events) = index.subtree("moodle:1").unwrap();
+
+        let node_ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(node_ids, ["moodle:1", "moodle:sec:3", "moodle:mod:4"]);
+        let file_ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(file_ids, ["moodle:f1", "moodle:f2", "moodle:f3"]);
+        let event_ids: Vec<&str> = events.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(event_ids, ["moodle:e2"]);
+    }
+
+    #[test]
+    fn subtree_of_a_leaf_and_of_nothing() {
+        let index = sample();
+
+        let (nodes, files, events) = index.subtree("moodle:2").unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert!(files.is_empty());
+        assert!(events.is_empty());
+
+        // Never indexed: there is nothing to carry over.
+        assert!(index.subtree("moodle:404").is_none());
     }
 
     #[test]
