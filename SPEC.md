@@ -494,7 +494,7 @@ and index paths). No wall of prose; examples over explanation.
 | 3 | TUI Files tab (Moodle), aliases, reader overlay for pages | done 2026-10-19 |
 | 4 | `put` for Moodle assignments; Todo tab | done 2026-10-19; real sync 15 courses / 326 files / 70 assignments in 4.7 s |
 | 5 | Calendar tab, `cal` | done 2026-10-19 (times shown in UTC; no date crate) |
-| 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | implemented 2026-10-19; awaiting the first real `login teams` |
+| 6 | Teams: `login teams`, sync, get/put, messages reader, TUI integration | implemented 2026-10-19; first real `login teams` succeeded 2026-11-07 |
 | 7 | Shell completions, `whoami`, incremental sync, polish | completions + whoami done 2026-10-19; files view, hiding, subsections, styled reader, `completions --install` 2026-10-22; Teams `delta` sync pending |
 
 ## 11. API reference (grounded in the reference impl)
@@ -534,6 +534,6 @@ Microsoft Graph (v1.0) endpoints:
 
 ## 12. Open questions
 
-- `[?]` Does AMU conditional access permit the Teams-client token on an
-  unmanaged Linux device? Only a real `login teams` run will tell; surfaces
-  as an AADSTS code if not.
+- `[x]` Does AMU conditional access permit the Teams-client token on an
+  unmanaged Linux device? Yes — the first real `login teams` succeeded
+  (2026-11-07).
